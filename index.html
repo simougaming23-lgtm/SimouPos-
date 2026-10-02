@@ -208,7 +208,7 @@ html.light #invoicesTableList td:last-child, html.light #purchasesList td:last-c
 <span id="totalAmount" class="text-3xl font-black text-emerald-400">0.00 <span class="text-sm">د.ج</span></span>
 </div>
 <div class="grid grid-cols-2 gap-3">
-<button onclick="checkout('CASH')" class="emerald-gradient text-gray-950 font-extrabold py-3.5 rounded-xl hover:opacity-90 transition shadow-lg shadow-emerald-500/20 text-center">دفع كاش 💵</button>
+<button id="btnPay" onclick="checkout('CASH')" class="emerald-gradient text-gray-950 font-extrabold py-3.5 rounded-xl hover:opacity-90 transition shadow-lg shadow-emerald-500/20 text-center">دفع كاش 💵</button>
 <button onclick="checkout('CREDIT')" class="gold-gradient text-gray-950 font-extrabold py-3.5 rounded-xl hover:opacity-90 transition shadow-lg shadow-amber-500/20 text-center">تسجيل كريدي 📝</button>
 </div>
 </div>
@@ -496,9 +496,9 @@ function renderCart() {
         <td class="p-2 text-center"><button onclick="cart.splice(${i},1);renderCart()" class="text-rose-400">✖</button></td></tr>`).join('');
     if ($('subInfo')) $('subInfo').textContent = 'المجموع: ' + fmt(cartSub()) + '  −  تخفيض: ' + fmt(cartDiscAmt());
     $('totalAmount').innerHTML = `${fmt(cartTotal())} <span class="text-sm">د.ج</span>`;
-    if ($('recvInfo')) { const rv = $('recvAmt').value, t = cartTotal(), ri = $('recvInfo');
+    if ($('recvInfo')) { updPayUI(); const rv = $('recvAmt').value, t = cartTotal(), ri = $('recvInfo');
         if (rv === '' || !cart.length) ri.innerHTML = '';
-        else if (+rv >= t - 1e-9) ri.innerHTML = `<span class="text-emerald-400">↩️ الباقي للزبون: ${fmt(+rv - t)} د.ج</span>`;
+        else if (+rv >= t - 1e-9) ri.innerHTML = (payMethod === 'card' ? '<span class="text-emerald-400">✔ دفع كامل بالبطاقة</span>' : `<span class="text-emerald-400">↩️ الباقي للزبون: ${fmt(+rv - t)} د.ج</span>`);
         else ri.innerHTML = `<span class="text-amber-400">⏳ دفع جزئي — المتبقي كدين: ${fmt(t - +rv)} د.ج</span>`; }
 }
 const cartSub = () => cart.reduce((s, c) => s + c.qty * c.price, 0);
@@ -507,19 +507,27 @@ const cartDiscAmt = () => Math.min(cartSub(), cartDisc.type === 'PCT' ? cartSub(
 const cartTotal = () => cartSub() - cartDiscAmt();
 function setCartPrice(i, v) { v = parseFloat(v); if (v >= 0) cart[i].price = v; renderCart(); }
 function setDisc() { cartDisc = { type: $('discType').value, v: Math.max(0, +$('discVal').value || 0) }; renderCart(); }
+var payMethod = 'cash';
+function setPay(m) { payMethod = m; renderCart(); }
+function updPayUI() {
+    const card = payMethod === 'card';
+    [['pmCash', !card], ['pmCard', card]].forEach(([id, on]) => { const b = $(id); if (!b) return; b.style.borderColor = on ? '#34d399' : '#374151'; b.style.color = on ? '#34d399' : '#9ca3af'; b.style.background = on ? 'rgba(52,211,153,.12)' : 'transparent'; });
+    if ($('btnPay')) $('btnPay').textContent = card ? 'دفع بالبطاقة 💳' : 'دفع كاش 💵';
+    if ($('recvLbl')) $('recvLbl').textContent = card ? '💳 المبلغ المدفوع:' : '💵 المبلغ المستلم:';
+}
 function clearCart() { if ($('recvAmt')) $('recvAmt').value = ''; cart = []; cartDisc = { type: 'PCT', v: 0 }; if ($('discVal')) $('discVal').value = ''; renderCart(); }
 
 function checkout(type) {
     if (!cart.length) return alert('السلة فارغة');
     const cid = $('cartCustomer').value, total = cartTotal(), disc = cartDiscAmt();
-    const rv = $('recvAmt').value.trim(), recv = rv === '' ? null : Math.max(0, +rv || 0);
+    const pm = payMethod, rv = $('recvAmt').value.trim(), recv = rv === '' ? null : Math.max(0, +rv || 0);
     let paid = total, change = 0;
     if (type === 'CASH') {
         if (recv !== null && recv < total - 1e-9) {
             if (!cid) return alert('الدفع الجزئي يتطلب اختيار الزبون لتسجيل المتبقي كدين');
             if (!confirm(`المدفوع ${fmt(recv)} من ${fmt(total)}\nتسجيل المتبقي ${fmt(total - recv)} كدين على الزبون؟`)) return;
             type = 'CREDIT'; paid = recv;
-        } else if (recv !== null) change = recv - total;
+        } else if (recv !== null && pm === 'cash') change = recv - total;
     } else {
         if (!cid) return alert('اختر الزبون لتسجيل الكريدي');
         paid = recv !== null ? Math.min(total, recv) : 0;
@@ -527,9 +535,9 @@ function checkout(type) {
     const profit = cart.reduce((s, c) => s + c.qty * (c.price - c.cost), 0) - disc;
     cart.forEach(c => { getP(c.pid).stock -= c.need; if (getP(c.pid).type === 'WEIGHT') getP(c.pid).stock = Math.round(getP(c.pid).stock * 1000) / 1000; });
     if (type === 'CREDIT') db.customers.find(x => x.id == cid).debt += total - paid;
-    db.invoices.unshift({ id: uid(), date: new Date().toISOString(), items: cart, total, discount: disc, profit, type, paid, customerId: cid || null });
-    save(); cart = []; cartDisc = { type: 'PCT', v: 0 }; $('discVal').value = ''; $('recvAmt').value = ''; renderCart(); renderAll();
-    toast(change > 0 ? `تم البيع ✔ — الباقي للزبون: ${fmt(change)} د.ج` : type === 'CASH' ? 'تم البيع ✔' : paid > 0 ? `تم تسجيل دفع جزئي ✔ — المتبقي دين: ${fmt(total - paid)}` : 'تم تسجيل الدين ✔');
+    db.invoices.unshift({ id: uid(), date: new Date().toISOString(), items: cart, total, discount: disc, profit, type, paid, method: paid > 0 ? pm : null, customerId: cid || null });
+    save(); cart = []; cartDisc = { type: 'PCT', v: 0 }; $('discVal').value = ''; $('recvAmt').value = ''; payMethod = 'cash'; renderCart(); renderAll();
+    toast(change > 0 ? `تم البيع ✔ — الباقي للزبون: ${fmt(change)} د.ج` : type === 'CASH' ? (pm === 'card' ? 'تم البيع بالبطاقة 💳 ✔' : 'تم البيع ✔') : paid > 0 ? `تم تسجيل دفع جزئي ✔ — المتبقي دين: ${fmt(total - paid)}` : 'تم تسجيل الدين ✔');
 }
 
 /* ---------- Products ---------- */
@@ -628,7 +636,7 @@ function renderInvoices() {
         const cu = db.customers.find(x => x.id == inv.customerId);
         return `<tr><td class="p-2.5">${db.invoices.length - n}</td>
         <td class="p-2.5">${new Date(inv.date).toLocaleString('ar-DZ')}</td><td class="p-2.5">${esc(cu ? cu.name : '—')}</td>
-        <td class="p-2.5">${inv.type === 'CASH' ? '💵 كاش' : paidOf(inv) > 0 ? '◐ جزئي (مدفوع ' + fmt(paidOf(inv)) + ')' : '📝 كريدي'}</td>
+        <td class="p-2.5">${inv.type === 'CASH' ? (inv.method === 'card' ? '💳 بطاقة' : '💵 كاش') : paidOf(inv) > 0 ? '◐ جزئي (مدفوع ' + fmt(paidOf(inv)) + (inv.method === 'card' ? ' 💳' : '') + ')' : '📝 كريدي'}</td>
         <td class="p-2.5">${inv.items.map(c => `${esc(c.name)} ×${fmtQty(c.qty, c.unit)} @ ${fmt(c.price)}${pl(c.unit)}`).join('، ')}</td>
         <td class="p-2.5 font-bold text-emerald-400">${fmt(inv.total)}${inv.discount ? `<div class="text-[10px] text-rose-400">تخفيض ${fmt(inv.discount)}</div>` : ''}</td>
         <td class="p-2.5 text-center whitespace-nowrap"><button onclick="printInvoice(${inv.id})" class="text-emerald-400 mx-1">🖨️</button><button onclick="editInvoice(${inv.id})" class="text-amber-400 mx-1 font-bold">✏️ تعديل</button><button onclick="delInvoice(${inv.id})" class="text-rose-400 mx-1">🗑️</button></td></tr>`;
@@ -683,7 +691,7 @@ function onCamCode(code) {
 const inp = 'bg-gray-900 border border-gray-700 rounded-xl p-2 text-sm text-white';
 $('pBarcode').closest('.grid').insertAdjacentHTML('afterend', `<div><label class="text-xs text-gray-400">🏷️ تخفيض على المنتج % (اختياري)</label><input type="number" min="0" max="100" step="any" id="pDisc" placeholder="0" class="w-full ${inp} mt-1"></div>`);
 $('totalAmount').parentElement.insertAdjacentHTML('beforebegin', `<div class="flex gap-2 items-center"><span class="text-xs text-gray-400 whitespace-nowrap">🏷️ تخفيض:</span><input id="discVal" type="number" min="0" step="any" oninput="setDisc()" placeholder="0" class="flex-1 ${inp}"><select id="discType" onchange="setDisc()" class="${inp}"><option value="PCT">%</option><option value="AMT">د.ج</option></select></div><div id="subInfo" class="text-[11px] text-gray-500"></div>`);
-$('totalAmount').parentElement.insertAdjacentHTML('afterend', `<div class="space-y-1"><div class="flex gap-2 items-center"><span class="text-xs text-gray-400 whitespace-nowrap">💵 المبلغ المستلم:</span><input id="recvAmt" type="number" min="0" step="any" oninput="renderCart()" placeholder="0" class="flex-1 ${inp}"><button type="button" onclick="$('recvAmt').value=cartTotal().toFixed(2);renderCart()" class="text-xs px-3 rounded-xl border border-emerald-500/40 text-emerald-400 font-bold">بالضبط</button></div><div id="recvInfo" class="text-sm font-bold min-h-[1.25rem]"></div></div>`);
+$('totalAmount').parentElement.insertAdjacentHTML('afterend', `<div class="space-y-1"><div class="grid grid-cols-2 gap-2"><button type="button" id="pmCash" onclick="setPay('cash')" class="py-2 rounded-xl text-sm font-bold border">💵 كاش</button><button type="button" id="pmCard" onclick="setPay('card')" class="py-2 rounded-xl text-sm font-bold border">💳 بطاقة</button></div><div class="flex gap-2 items-center"><span id="recvLbl" class="text-xs text-gray-400 whitespace-nowrap">💵 المبلغ المستلم:</span><input id="recvAmt" type="number" min="0" step="any" oninput="renderCart()" placeholder="0" class="flex-1 ${inp}"><button type="button" onclick="$('recvAmt').value=cartTotal().toFixed(2);renderCart()" class="text-xs px-3 rounded-xl border border-emerald-500/40 text-emerald-400 font-bold">بالضبط</button></div><div id="recvInfo" class="text-sm font-bold min-h-[1.25rem]"></div></div>`);
 $('view-invoices').insertAdjacentHTML('beforeend', `<div class="glass-card p-5 rounded-2xl mt-4"><h2 class="font-extrabold text-white border-b border-gray-800 pb-2 mb-4">🧾 فواتير الشراء</h2><div class="overflow-x-auto max-h-[420px]"><table class="w-full text-xs text-right"><thead class="bg-gray-900 text-gray-400 sticky top-0"><tr><th class="p-2.5">التاريخ</th><th class="p-2.5">المورد</th><th class="p-2.5">المنتجات</th><th class="p-2.5">المجموع</th><th class="p-2.5">المدفوع</th><th class="p-2.5 text-center">إجراءات</th></tr></thead><tbody id="purchasesList" class="divide-y divide-gray-800"></tbody></table></div></div>`);
 document.body.insertAdjacentHTML('beforeend', `<div id="purModal" class="hidden fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto"><div class="glass-card rounded-2xl p-4 w-full max-w-lg space-y-3">
 <div class="flex justify-between"><h3 id="purTitle" class="font-bold text-white"></h3><button onclick="$('purModal').classList.add('hidden')" class="text-rose-400 font-bold">✖</button></div>
@@ -810,7 +818,8 @@ $('view-invoices').insertAdjacentHTML('afterend', `<div id="view-finance" class=
 const paidOf = i => i.paid ?? (i.type === 'CASH' ? i.total : 0), owed = i => i.type === 'CREDIT' ? Math.max(0, i.total - paidOf(i)) : 0;
 const sumBy = (arr, f) => arr.reduce((s, x) => s + (+f(x) || 0), 0);
 const stockValue = () => sumBy(db.products, p => p.stock * (p.type === 'WEIGHT' ? p.costKg : p.costPiece));
-const cashNow = () => (+db.settings.cash || 0) + sumBy(db.invoices, paidOf)
+const cardNow = () => sumBy(db.invoices.filter(i => i.method === 'card'), paidOf);
+const cashNow = () => (+db.settings.cash || 0) + sumBy(db.invoices.filter(i => i.method !== 'card'), paidOf)
     + sumBy(db.payments.filter(p => p.kind === 'CUST'), p => p.amount) - sumBy(db.purchases, p => p.paid)
     - sumBy(db.payments.filter(p => p.kind === 'SUP'), p => p.amount) - sumBy(db.expenses, e => e.amount);
 function setSetting(k, v) { db.settings[k] = parseFloat(v) || 0; save(); renderFinance(); }
@@ -827,9 +836,9 @@ function payZakat(rem) {
 }
 function renderFinance() {
     if (!$('capBox')) return;
-    const stock = stockValue(), cash = cashNow(), recv = sumBy(db.customers, c => c.debt), pay = sumBy(db.suppliers, x => x.debt), cap = stock + cash + recv - pay;
+    const stock = stockValue(), cash = cashNow(), bank = cardNow(), recv = sumBy(db.customers, c => c.debt), pay = sumBy(db.suppliers, x => x.debt), cap = stock + cash + bank + recv - pay;
     const card = (t, v, c) => `<div class="bg-gray-900/70 rounded-xl p-3 border border-gray-800"><div class="text-gray-400 mb-1">${t}</div><div class="font-black text-base ${c}">${fmt(v)}</div></div>`;
-    $('capBox').innerHTML = card('💵 السيولة النقدية', cash, cash < 0 ? 'text-rose-400' : 'text-emerald-400') + card('📦 قيمة المخزون (بسعر الشراء)', stock, 'text-emerald-400') + card('👥 ديون لنا عند الزبائن', recv, 'text-amber-300') + card('🏭 ديون علينا للموردين', -pay, 'text-rose-400')
+    $('capBox').innerHTML = card('💵 السيولة النقدية', cash, cash < 0 ? 'text-rose-400' : 'text-emerald-400') + card('💳 رصيد البطاقة (البنك)', bank, 'text-sky-400') + card('📦 قيمة المخزون (بسعر الشراء)', stock, 'text-emerald-400') + card('👥 ديون لنا عند الزبائن', recv, 'text-amber-300') + card('🏭 ديون علينا للموردين', -pay, 'text-rose-400')
         + `<div class="col-span-2 md:col-span-4 gold-gradient text-gray-950 rounded-xl p-3 flex justify-between items-center"><b>رأس المال العام الصافي</b><b class="text-xl">${fmt(cap)} د.ج</b></div>`;
     const gold = +db.settings.gold || 0, nisab = 85 * gold, base = Math.max(0, cap), due = gold > 0 && base >= nisab ? base * 0.025 : 0;
     const paid = sumBy(db.expenses.filter(e => e.cat === 'زكاة'), e => e.amount), rem = Math.max(0, due - paid);
@@ -891,7 +900,7 @@ function printInvoice(id) {
     const cu = db.customers.find(x => x.id == inv.customerId);
     const rows = inv.items.map(c => `<tr><td>${esc(c.name)}<br><small>${fmtQty(c.qty, c.unit)} × ${fmt(c.price)}${pl(c.unit)}</small></td><td style="text-align:left">${fmt(c.qty * c.price)}</td></tr>`).join('');
     const w = window.open('', '_blank', 'width=380,height=640'); if (!w) return toast('اسمح بالنوافذ المنبثقة', 'err');
-    w.document.write(`<html dir="rtl"><head><meta charset="utf-8"><title>فاتورة</title><style>body{font-family:Tahoma,Arial;width:72mm;margin:auto;font-size:12px}h2,p{text-align:center;margin:4px 0}table{width:100%;border-collapse:collapse}td{padding:4px 0;border-bottom:1px dashed #999}.t{font-size:16px;font-weight:bold}</style></head><body><h2>Simou POS</h2><p>${new Date(inv.date).toLocaleString('ar-DZ')}</p>${cu ? `<p>الزبون: ${esc(cu.name)}</p>` : ''}<table>${rows}</table>${inv.discount ? `<p>تخفيض: ${fmt(inv.discount)}</p>` : ''}<p class="t">الإجمالي: ${fmt(inv.total)} د.ج</p><p>${inv.type === 'CASH' ? 'مدفوع كاش' : 'كريدي'}</p><p>شكرًا لزيارتكم</p><script>onload=()=>print()<\/script></body></html>`);
+    w.document.write(`<html dir="rtl"><head><meta charset="utf-8"><title>فاتورة</title><style>body{font-family:Tahoma,Arial;width:72mm;margin:auto;font-size:12px}h2,p{text-align:center;margin:4px 0}table{width:100%;border-collapse:collapse}td{padding:4px 0;border-bottom:1px dashed #999}.t{font-size:16px;font-weight:bold}</style></head><body><h2>Simou POS</h2><p>${new Date(inv.date).toLocaleString('ar-DZ')}</p>${cu ? `<p>الزبون: ${esc(cu.name)}</p>` : ''}<table>${rows}</table>${inv.discount ? `<p>تخفيض: ${fmt(inv.discount)}</p>` : ''}<p class="t">الإجمالي: ${fmt(inv.total)} د.ج</p><p>${inv.type === 'CASH' ? (inv.method === 'card' ? 'مدفوع بالبطاقة' : 'مدفوع كاش') : paidOf(inv) > 0 ? 'مدفوع ' + fmt(paidOf(inv)) + (inv.method === 'card' ? ' (بطاقة)' : '') + ' — المتبقي ' + fmt(owed(inv)) : 'كريدي'}</p><p>شكرًا لزيارتكم</p><script>onload=()=>print()<\/script></body></html>`);
     w.document.close();
 }
 
@@ -903,7 +912,7 @@ $('themeBtn').textContent = document.documentElement.classList.contains('light')
 /* ---------- Full sales invoice editor ---------- */
 document.body.insertAdjacentHTML('beforeend', `<div id="invEditModal" class="hidden fixed inset-0 z-50 bg-black/85 flex items-start justify-center p-3 overflow-y-auto"><div class="glass-card rounded-2xl p-4 w-full max-w-lg space-y-3 my-4">
 <div class="flex justify-between"><h3 class="font-bold text-white">✏️ تعديل فاتورة البيع</h3><button onclick="$('invEditModal').classList.add('hidden')" class="text-rose-400 font-bold">✖</button></div>
-<div class="grid grid-cols-2 gap-2"><select id="eCust" class="${inp}"></select><select id="eType" class="${inp}"><option value="CASH">💵 كاش</option><option value="CREDIT">📝 كريدي</option></select></div>
+<div class="grid grid-cols-2 gap-2"><select id="eCust" class="${inp}"></select><select id="eType" class="${inp}"><option value="CASH">💵 كاش</option><option value="CARD">💳 بطاقة</option><option value="CREDIT">📝 كريدي</option></select></div>
 <div class="overflow-x-auto"><table class="w-full text-xs text-right"><thead class="bg-gray-900 text-gray-400"><tr><th class="p-1"></th><th class="p-1">المنتج</th><th class="p-1">الكمية</th><th class="p-1">سعر الوحدة</th><th class="p-1">المجموع</th></tr></thead><tbody id="eLines" class="divide-y divide-gray-800"></tbody></table></div>
 <div class="border border-dashed border-gray-700 rounded-xl p-2 space-y-2"><div class="text-xs text-gray-400">➕ إضافة منتج للفاتورة</div>
 <select id="eProd" onchange="eProdChange()" class="w-full ${inp}"></select>
@@ -916,7 +925,7 @@ function editInvoice(id) {
     const inv = db.invoices.find(i => i.id == id); if (!inv) return;
     eInv = JSON.parse(JSON.stringify(inv)); eInv.items.forEach(l => { l.k = l.qty ? l.need / l.qty : 1; });
     $('eCust').innerHTML = '<option value="">— زبون عادي —</option>' + db.customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
-    $('eCust').value = eInv.customerId || ''; $('eType').value = eInv.type; $('eDisc').value = eInv.discount || '';
+    $('eCust').value = eInv.customerId || ''; $('eType').value = eInv.type === 'CASH' && eInv.method === 'card' ? 'CARD' : eInv.type; $('eDisc').value = eInv.discount || '';
     $('eProd').innerHTML = db.products.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
     eProdChange(); $('invEditModal').classList.remove('hidden'); renderEdit();
 }
@@ -940,7 +949,7 @@ function renderEdit() {
 function saveInvoiceEdit() {
     const o = db.invoices.find(i => i.id == eInv.id); if (!o) return;
     const items = eInv.items.filter(l => l.qty > 0); if (!items.length) return alert('الفاتورة فارغة، استعمل 🗑️ لإلغائها');
-    const type = $('eType').value, cid = $('eCust').value || null;
+    const sel = $('eType').value, type = sel === 'CARD' ? 'CASH' : sel, cid = $('eCust').value || null;
     if (type === 'CREDIT' && !cid) return alert('اختر الزبون للكريدي');
     const delta = {}; o.items.forEach(c => { delta[c.pid] = (delta[c.pid] || 0) + c.need; }); items.forEach(l => { delta[l.pid] = (delta[l.pid] || 0) - l.qty * l.k; });
     for (const pid in delta) { const p = getP(pid); if (p && p.stock + delta[pid] < -1e-9) return alert('المخزون غير كافٍ لـ «' + p.name + '»'); }
@@ -950,7 +959,7 @@ function saveInvoiceEdit() {
     const keep = type === 'CREDIT' && o.type === 'CREDIT' ? Math.min(total, paidOf(o)) : 0;
     if (type === 'CREDIT') { const cu = db.customers.find(x => x.id == cid); if (cu) cu.debt += total - keep; }
     items.forEach(l => { l.need = l.qty * l.k; delete l.k; });
-    Object.assign(o, { items, discount: disc, total, profit: items.reduce((s, l) => s + l.qty * (l.price - l.cost), 0) - disc, type, customerId: cid, paid: type === 'CASH' ? total : keep });
+    Object.assign(o, { items, discount: disc, total, profit: items.reduce((s, l) => s + l.qty * (l.price - l.cost), 0) - disc, type, customerId: cid, paid: type === 'CASH' ? total : keep, method: sel === 'CARD' ? 'card' : type === 'CASH' ? 'cash' : o.method });
     save(); $('invEditModal').classList.add('hidden'); renderAll(); toast('تم تعديل الفاتورة ✔');
 }
 
@@ -1183,7 +1192,7 @@ $('camStatus').insertAdjacentHTML('afterend', '<button onclick="$(\'camFile\').c
 
 /* ---------- Comprehensive settings ---------- */
 document.body.insertAdjacentHTML('beforeend', `<div id="setModal" onclick="if(event.target===this)closeSettings()" style="display:none;position:fixed;inset:0;z-index:110;background:rgba(3,7,12,.65);backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:12px"><div class="glass-card rounded-2xl p-4 w-full" style="max-width:440px;max-height:92vh;overflow-y:auto">
-<div class="flex justify-between items-center border-b border-gray-800 pb-2 mb-3"><h3 class="font-extrabold text-white">⚙️ الإعدادات الشاملة</h3><button onclick="closeSettings()" class="text-rose-400 font-bold">✖</button></div>
+<div class="flex justify-between items-center border-b border-gray-800 pb-2 mb-3"><h3 class="font-extrabold text-white">⚙️ الإعدادات الشاملة <span id="setVer2" class="text-xs font-normal text-gray-400 mr-2"></span></h3><button onclick="closeSettings()" class="text-rose-400 font-bold">✖</button></div>
 <div class="text-xs text-gray-400 mb-1">🎛️ أدوات التحكم</div><div id="setTools" class="grid grid-cols-2 gap-2 mb-4"></div>
 <div id="setCapital"></div>
 <div class="text-xs text-gray-400 mt-4 mb-1">👤 الحساب والجهاز</div>
@@ -1202,7 +1211,7 @@ const hdrBox = $('clock').parentElement;
 const capCard = $('setCash').closest('.glass-card'); capCard.className = 'space-y-3'; $('setCapital').appendChild(capCard);
 hdrBox.insertAdjacentHTML('beforeend', '<button onclick="openSettings()" class="text-xs px-3 py-1.5 rounded-xl border border-emerald-500/40 bg-gray-900/60 text-emerald-300 font-bold">⚙️ الإعدادات</button>');
 function copyWa() { const n = '+' + PHONE; const done = () => toast('تم نسخ الرقم ' + n); if (navigator.clipboard) navigator.clipboard.writeText(n).then(done, done); else done(); }
-function openSettings() { $('setKid').textContent = LIC_PUB.x.slice(0, 6); $('setWaNum').textContent = '+' + PHONE.replace(/^(\d{3})(\d{3})(\d{2})(\d{2})(\d{2})$/, '$1 $2 $3 $4 $5'); $('setWa').href = 'https://wa.me/' + PHONE + '?text=' + encodeURIComponent('السلام عليكم، أحتاج مساعدة في Simou POS.\nرقم جهازي: ' + lic.dev + '\nالإصدار: ' + APP_VERSION); $('setVer').textContent = APP_VERSION; $('setQ').value = acct && acct.q || ''; $('setUser').textContent = acct ? acct.u : '-'; $('setDev').textContent = lic.dev; $('setModal').style.display = 'flex'; }
+function openSettings() { $('setKid').textContent = LIC_PUB.x.slice(0, 6); $('setWaNum').textContent = '+' + PHONE.replace(/^(\d{3})(\d{3})(\d{2})(\d{2})(\d{2})$/, '$1 $2 $3 $4 $5'); $('setWa').href = 'https://wa.me/' + PHONE + '?text=' + encodeURIComponent('السلام عليكم، أحتاج مساعدة في Simou POS.\nرقم جهازي: ' + lic.dev + '\nالإصدار: ' + APP_VERSION); $('setVer').textContent = APP_VERSION; $('setVer2').textContent = 'v' + APP_VERSION; $('setQ').value = acct && acct.q || ''; $('setUser').textContent = acct ? acct.u : '-'; $('setDev').textContent = lic.dev; $('setModal').style.display = 'flex'; }
 function closeSettings() { $('setModal').style.display = 'none'; }
 function logout() { try { sessionStorage.removeItem('sp_in'); } catch {} closeSettings(); $('acP').value = ''; showAcct(); }
 $('licModal').remove();
@@ -1210,7 +1219,7 @@ $('licModal').remove();
 renderAll(); renderCart(); selectUnit('BOX'); __ready = true; renderLic();
 
 /* ---------- App update notifications (reads version.json from the server) ---------- */
-var APP_VERSION = '1.0.2', updInfo = null, lastChk = 0;
+var APP_VERSION = '1.0.3', updInfo = null, lastChk = 0;
 const verGt = (a, b) => { const A = String(a).split('.').map(Number), B = String(b).split('.').map(Number); for (let i = 0; i < Math.max(A.length, B.length); i++) { const x = A[i] || 0, y = B[i] || 0; if (x !== y) return x > y; } return false; };
 const escU = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 async function checkUpdate(manual) {
