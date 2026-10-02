@@ -394,15 +394,32 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = n => (Math.round((+n + Number.EPSILON) * 100) / 100).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
-let db = { products: load('sp_products', []), customers: load('sp_customers', []), suppliers: load('sp_suppliers', []), invoices: load('sp_invoices', []), purchases: load('sp_purchases', []), expenses: load('sp_expenses', []), payments: load('sp_payments', []), settings: load('sp_settings', { cash: 0, gold: 0 }) };
-const save = () => { try { for (const k in db) localStorage.setItem('sp_' + k, JSON.stringify(db[k])); } catch {} };
+let db = { products: load('sp_products', []), customers: load('sp_customers', []), suppliers: load('sp_suppliers', []), invoices: load('sp_invoices', []), purchases: load('sp_purchases', []), expenses: load('sp_expenses', []), payments: load('sp_payments', []), audit: load('sp_audit', []), ledger: load('sp_ledger', []), settings: load('sp_settings', { cash: 0, gold: 0 }) };
+var __testing = false;
+const save = () => {
+    if (__testing) return true;
+    try { for (const k in db) localStorage.setItem('sp_' + k, JSON.stringify(db[k])); const w = document.getElementById('saveWarn'); if (w) w.remove(); return true; }
+    catch (e) { saveFail(e); return false; }
+};
+function saveFail(e) {
+    if (document.getElementById('saveWarn')) return;
+    document.body.insertAdjacentHTML('beforeend', `<div id="saveWarn" style="position:fixed;top:0;left:0;right:0;z-index:9998;background:#be123c;color:#fff;padding:10px;text-align:center;font-weight:700;font-size:13px">⚠️ فشل حفظ البيانات! (${e && e.name === 'QuotaExceededError' ? 'المساحة ممتلئة' : 'المتصفح يمنع الحفظ'}) — حمّل نسخة احتياطية الآن <button onclick="exportData()" style="margin-right:8px;background:#fff;color:#be123c;border-radius:8px;padding:2px 10px">⬇️ نسخة</button></div>`);
+}
 let cart = [], unit = 'BOX', editingId = null;
 const uid = () => Date.now() + Math.floor(Math.random() * 1000);
 const getP = id => db.products.find(p => p.id == id);
+const actProds = () => db.products.filter(p => p.active !== false);
+const liveInv = () => db.invoices.filter(i => !i.cancelled);
+const livePur = () => db.purchases.filter(p => !p.cancelled);
+const logA = (a, d) => { db.audit.unshift({ t: new Date().toISOString(), u: (typeof acct !== 'undefined' && acct) ? acct.u : '-', a, d: d || '' }); if (db.audit.length > 1000) db.audit.length = 1000; };
+const mv = (p, delta, reason, ref) => { p.stock = p.type === 'WEIGHT' ? Math.round((p.stock + delta) * 1000) / 1000 : p.stock + delta; db.ledger.unshift({ t: new Date().toISOString(), pid: p.id, n: p.name, d: delta, s: p.stock, r: reason, ref: ref || null }); if (db.ledger.length > 3000) db.ledger.length = 3000; };
+const nextNo = k => { db.settings[k] = (db.settings[k] || 0) + 1; return db.settings[k]; };
+var invLow = false;
+function LOW(p) { return p.stock <= (p.type === 'WEIGHT' ? 1 : 5); }
 
 /* ---------- Tabs ---------- */
 function switchTab(t) {
-    ['pos','products','customers','suppliers','invoices','finance'].forEach(n => {
+    ['pos','products','inventory','customers','suppliers','invoices','finance'].forEach(n => {
         $('view-' + n).classList.toggle('hidden', n !== t);
         const b = $('tab-' + n);
         b.className = 'tab-btn px-5 py-2.5 rounded-xl transition flex items-center gap-2 ' +
@@ -415,7 +432,7 @@ function switchTab(t) {
 /* ---------- POS ---------- */
 function renderProductSelect() {
     const cur = $('productSelect').value;
-    $('productSelect').innerHTML = db.products.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('') || '<option value="">لا توجد منتجات</option>';
+    $('productSelect').innerHTML = actProds().map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('') || '<option value="">لا توجد منتجات</option>';
     if (cur && getP(cur)) $('productSelect').value = cur;
     const cs = $('cartCustomer').value;
     $('cartCustomer').innerHTML = '<option value="">— زبون عادي —</option>' + db.customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
@@ -451,7 +468,7 @@ function selectUnit(u) {
 function scanBarcode() {
     const code = $('barcodeScan').value.trim();
     if (!code) return;
-    const p = db.products.find(x => (x.barcode || '').trim() === code);
+    const p = actProds().find(x => (x.barcode || '').trim() === code);
     $('barcodeScan').value = '';
     if (!p) { alert('باركود غير موجود: ' + code); $('barcodeScan').focus(); return; }
     $('productSelect').value = p.id;
@@ -520,6 +537,8 @@ function clearCart() { if ($('recvAmt')) $('recvAmt').value = ''; cart = []; car
 function checkout(type) {
     if (!cart.length) return alert('السلة فارغة');
     const cid = $('cartCustomer').value, total = cartTotal(), disc = cartDiscAmt();
+    const need = {}; cart.forEach(c => { need[c.pid] = (need[c.pid] || 0) + c.need; });
+    for (const pid in need) { const p = getP(pid); if (!p || p.active === false) return alert('منتج غير متاح في السلة'); if (p.stock + 1e-9 < need[pid]) return alert('المخزون غير كافٍ لـ «' + p.name + '»'); }
     const pm = payMethod, rv = $('recvAmt').value.trim(), recv = rv === '' ? null : Math.max(0, +rv || 0);
     let paid = total, change = 0;
     if (type === 'CASH') {
@@ -533,10 +552,11 @@ function checkout(type) {
         paid = recv !== null ? Math.min(total, recv) : 0;
     }
     const profit = cart.reduce((s, c) => s + c.qty * (c.price - c.cost), 0) - disc;
-    cart.forEach(c => { getP(c.pid).stock -= c.need; if (getP(c.pid).type === 'WEIGHT') getP(c.pid).stock = Math.round(getP(c.pid).stock * 1000) / 1000; });
+    const invId = uid(), no = nextNo('invNo');
+    cart.forEach(c => mv(getP(c.pid), -c.need, 'بيع #' + no, invId));
     if (type === 'CREDIT') db.customers.find(x => x.id == cid).debt += total - paid;
-    db.invoices.unshift({ id: uid(), date: new Date().toISOString(), items: cart, total, discount: disc, profit, type, paid, method: paid > 0 ? pm : null, customerId: cid || null });
-    save(); cart = []; cartDisc = { type: 'PCT', v: 0 }; $('discVal').value = ''; $('recvAmt').value = ''; payMethod = 'cash'; renderCart(); renderAll();
+    db.invoices.unshift({ id: invId, no, date: new Date().toISOString(), items: cart, total, discount: disc, profit, type, paid, method: paid > 0 ? pm : null, recv, change, customerId: cid || null });
+    save(); cart = []; cartDisc = { type: 'PCT', v: 0 }; $('discVal').value = ''; $('recvAmt').value = ''; payMethod = 'cash'; renderCart(); renderAll(); offerPrint(invId);
     toast(change > 0 ? `تم البيع ✔ — الباقي للزبون: ${fmt(change)} د.ج` : type === 'CASH' ? (pm === 'card' ? 'تم البيع بالبطاقة 💳 ✔' : 'تم البيع ✔') : paid > 0 ? `تم تسجيل دفع جزئي ✔ — المتبقي دين: ${fmt(total - paid)}` : 'تم تسجيل الدين ✔');
 }
 
@@ -557,8 +577,14 @@ $('productForm').addEventListener('submit', e => {
     if (w) Object.assign(p, { costKg: +$('pCostKg').value || 0, priceKg: +$('pPriceKg').value || 0, stock: +$('pTotalKg').value || 0 });
     else Object.assign(p, { costBox: +$('pCostBox').value || 0, itemsBox: +$('pItemsBox').value || 1, costPiece: +$('pCostPiece').value || 0,
         priceBox: +$('pPriceBox').value || 0, pricePiece: +$('pPricePiece').value || 0, stock: +$('pTotalPieces').value || 0 });
-    if (p.barcode && db.products.some(x => x.barcode === p.barcode && x.id !== p.id)) return alert('الباركود مستعمل لمنتج آخر');
+    if (p.barcode && db.products.some(x => x.active !== false && x.barcode === p.barcode && x.id !== p.id)) return alert('الباركود مستعمل لمنتج آخر');
     p.disc = Math.min(100, Math.max(0, +$('pDisc').value || 0));
+    const ex = getP(p.id), nowT = new Date().toISOString();
+    if (ex) {
+        const f = ['priceBox', 'pricePiece', 'priceKg', 'costBox', 'costPiece', 'costKg'].filter(k => (ex[k] || 0) !== (p[k] || 0));
+        if (f.length) logA('تعديل سعر', p.name + ': ' + f.map(k => k + ' ' + (ex[k] || 0) + '→' + (p[k] || 0)).join('، '));
+        if (ex.stock !== p.stock) { db.ledger.unshift({ t: nowT, pid: p.id, n: p.name, d: p.stock - ex.stock, s: p.stock, r: 'تعديل يدوي', ref: null }); logA('تعديل مخزون', p.name + ': ' + ex.stock + '→' + p.stock); }
+    } else { logA('إضافة منتج', p.name); if (p.stock) db.ledger.unshift({ t: nowT, pid: p.id, n: p.name, d: p.stock, s: p.stock, r: 'رصيد افتتاحي', ref: null }); }
     const i = db.products.findIndex(x => x.id === p.id);
     i >= 0 ? db.products[i] = p : db.products.push(p);
     editingId = null; e.target.reset(); toggleProductTypeInputs(); save(); renderAll();
@@ -572,9 +598,9 @@ function editProduct(id) {
         $('pPriceBox').value = p.priceBox; $('pPricePiece').value = p.pricePiece; $('pTotalPieces').value = p.stock; }
     window.scrollTo({ top: 0, behavior: 'smooth' });
 }
-function delProduct(id) { if (confirm('حذف المنتج؟')) { db.products = db.products.filter(p => p.id != id); save(); renderAll(); } }
+function delProduct(id) { const p = getP(id); if (!p || !confirm('إيقاف المنتج؟ يختفي من القوائم ويبقى في سجل الفواتير.')) return; p.active = false; logA('إيقاف منتج', p.name); save(); renderAll(); }
 function renderProducts() {
-    $('productsTableList').innerHTML = db.products.map(p => {
+    $('productsTableList').innerHTML = actProds().map(p => {
         const w = p.type === 'WEIGHT';
         return `<tr><td class="p-2.5 font-bold">${esc(p.name)}</td><td class="p-2.5">${w ? '⚖️ وزن' : '📦 وحدة'}</td>
         <td class="p-2.5">${fmt(w ? p.costKg : p.costPiece)}</td><td class="p-2.5">${fmt(w ? p.priceKg : p.pricePiece)}${p.disc ? ` <span class="text-rose-400 font-bold">-${p.disc}%</span>` : ''}</td>
@@ -622,28 +648,29 @@ function renderSuppliers() {
 /* ---------- Invoices ---------- */
 function delInvoice(id) {
     const inv = db.invoices.find(i => i.id == id);
-    if (!inv || !confirm('إلغاء الفاتورة وإرجاع المخزون؟')) return;
-    inv.items.forEach(c => { const p = getP(c.pid); if (p) p.stock += c.need; });
+    if (!inv || inv.cancelled || !confirm('إلغاء الفاتورة وإرجاع المخزون؟ تبقى في السجل كملغاة.')) return;
+    inv.items.forEach(c => { const p = getP(c.pid); if (p) mv(p, c.need, 'إلغاء فاتورة #' + (inv.no || ''), inv.id); });
     if (inv.type === 'CREDIT') { const cu = db.customers.find(x => x.id == inv.customerId); if (cu) cu.debt = Math.max(0, cu.debt - owed(inv)); }
-    db.invoices = db.invoices.filter(i => i.id != id); save(); renderAll();
+    inv.cancelled = true; inv.cancelledAt = new Date().toISOString();
+    logA('إلغاء فاتورة', '#' + (inv.no || inv.id) + ' — ' + fmt(inv.total)); save(); renderAll();
 }
 function renderInvoices() {
     const today = new Date().toDateString();
-    const t = db.invoices.filter(i => new Date(i.date).toDateString() === today);
+    const t = liveInv().filter(i => new Date(i.date).toDateString() === today);
     $('todaySales').textContent = fmt(t.reduce((s, i) => s + i.total, 0));
     $('todayProfit').textContent = fmt(t.reduce((s, i) => s + i.profit, 0));
     $('invoicesTableList').innerHTML = db.invoices.map((inv, n) => {
         const cu = db.customers.find(x => x.id == inv.customerId);
-        return `<tr><td class="p-2.5">${db.invoices.length - n}</td>
+        return `<tr ${inv.cancelled ? 'style="opacity:.5;text-decoration:line-through"' : ''}><td class="p-2.5">${inv.no || db.invoices.length - n}</td>
         <td class="p-2.5">${new Date(inv.date).toLocaleString('ar-DZ')}</td><td class="p-2.5">${esc(cu ? cu.name : '—')}</td>
-        <td class="p-2.5">${inv.type === 'CASH' ? (inv.method === 'card' ? '💳 بطاقة' : '💵 كاش') : paidOf(inv) > 0 ? '◐ جزئي (مدفوع ' + fmt(paidOf(inv)) + (inv.method === 'card' ? ' 💳' : '') + ')' : '📝 كريدي'}</td>
+        <td class="p-2.5">${inv.cancelled ? '❌ ملغاة ' : ''}${inv.type === 'CASH' ? (inv.method === 'card' ? '💳 بطاقة' : '💵 كاش') : paidOf(inv) > 0 ? '◐ جزئي (مدفوع ' + fmt(paidOf(inv)) + (inv.method === 'card' ? ' 💳' : '') + ')' : '📝 كريدي'}</td>
         <td class="p-2.5">${inv.items.map(c => `${esc(c.name)} ×${fmtQty(c.qty, c.unit)} @ ${fmt(c.price)}${pl(c.unit)}`).join('، ')}</td>
         <td class="p-2.5 font-bold text-emerald-400">${fmt(inv.total)}${inv.discount ? `<div class="text-[10px] text-rose-400">تخفيض ${fmt(inv.discount)}</div>` : ''}</td>
         <td class="p-2.5 text-center whitespace-nowrap"><button onclick="printInvoice(${inv.id})" class="text-emerald-400 mx-1">🖨️</button><button onclick="editInvoice(${inv.id})" class="text-amber-400 mx-1 font-bold">✏️ تعديل</button><button onclick="delInvoice(${inv.id})" class="text-rose-400 mx-1">🗑️</button></td></tr>`;
     }).join('');
 }
 
-function renderAll() { renderKpi(); renderFinance(); renderPurchases(); renderProductSelect(); renderProducts(); renderCustomers(); renderSuppliers(); renderInvoices(); }
+function renderAll() { renderKpi(); renderFinance(); renderPurchases(); renderProductSelect(); renderProducts(); renderCustomers(); renderSuppliers(); renderInvoices(); if ($('invList')) renderInventory(); }
 
 /* ---------- Camera barcode scanner ---------- */
 let camStream = null, camRunning = false, zxReader = null, lastCode = '', lastTime = 0;
@@ -679,7 +706,7 @@ function onCamCode(code) {
     code = String(code).trim(); const now = Date.now();
     if (!code || (code === lastCode && now - lastTime < 2000)) return;
     lastCode = code; lastTime = now; beep();
-    const p = db.products.find(x => (x.barcode || '').trim() === code);
+    const p = actProds().find(x => (x.barcode || '').trim() === code);
     if (!p) { $('camStatus').textContent = 'باركود غير مسجّل: ' + code; $('camStatus').className = 'text-center text-sm text-rose-400 font-bold mt-2 min-h-[1.5rem]'; return; }
     $('productSelect').value = p.id;
     if (p.type !== 'WEIGHT') { unit = 'PIECE'; $('saleQty').value = 1; }
@@ -704,7 +731,7 @@ document.body.insertAdjacentHTML('beforeend', `<div id="purModal" class="hidden 
 <button onclick="confirmPurchase()" class="w-full gold-gradient text-gray-950 font-extrabold py-3 rounded-xl">تأكيد فاتورة الشراء</button></div></div>`);
 
 function editInvoice(id) {
-    const inv = db.invoices.find(i => i.id == id); if (!inv) return;
+    const inv = db.invoices.find(i => i.id == id); if (!inv) return; if (inv.cancelled) return toast('الفاتورة ملغاة', 'err');
     const old = inv.total;
     inv.items.forEach(c => { const v = parseFloat(prompt(`سعر وحدة «${c.name}» (${unitLabel(c.unit)}):`, c.price)); if (v >= 0) c.price = v; });
     const d = parseFloat(prompt('التخفيض بالدينار (0 = بدون):', inv.discount || 0)); if (d >= 0) inv.discount = d;
@@ -717,10 +744,10 @@ function editInvoice(id) {
 
 let pSup = null, pLines = [];
 function openPurchase(id) {
-    if (!db.products.length) return alert('أضف منتجات أولًا');
+    if (!actProds().length) return alert('أضف منتجات أولًا');
     pSup = id; pLines = []; $('purDisc').value = ''; $('purPaid').value = '';
     $('purTitle').textContent = '🧾 فاتورة شراء — ' + db.suppliers.find(s => s.id == id).name;
-    $('purProd').innerHTML = db.products.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    $('purProd').innerHTML = actProds().map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
     $('purModal').classList.remove('hidden'); purProdChange(); renderPur();
 }
 function purProdChange() {
@@ -761,17 +788,19 @@ function renderPur() {
 function confirmPurchase() {
     if (!pLines.length) return alert('أضف سطرًا واحدًا على الأقل');
     const sub = purSub(), disc = purDisc(), total = sub - disc, paid = Math.min(total, Math.max(0, +$('purPaid').value || 0)), r = sub ? total / sub : 1;
+    const puId = uid(), puNo = nextNo('purNo');
     pLines.forEach(l => {
-        const p = getP(l.pid), eff = l.price * r; p.stock += l.need;
-        if (l.unit === 'KG') p.costKg = eff; else if (l.unit === 'BOX') { p.costBox = eff; p.costPiece = eff / p.itemsBox; } else { p.costPiece = eff; p.costBox = eff * p.itemsBox; }
-        if (p.type === 'WEIGHT') p.stock = Math.round(p.stock * 1000) / 1000;
+        const p = getP(l.pid), eff = l.price * r, base = l.unit === 'BOX' ? eff / (p.itemsBox || 1) : eff, w = p.type === 'WEIGHT';
+        const cur = (w ? p.costKg : p.costPiece) || 0, st = Math.max(0, p.stock), avg = st + l.need > 0 ? (st * cur + l.need * base) / (st + l.need) : base;
+        mv(p, l.need, 'شراء #' + puNo, puId);
+        if (w) p.costKg = avg; else { p.costPiece = avg; p.costBox = avg * (p.itemsBox || 1); }
     });
     db.suppliers.find(s => s.id == pSup).debt += total - paid;
-    db.purchases.unshift({ id: uid(), date: new Date().toISOString(), supplierId: pSup, items: pLines, discount: disc, total, paid });
+    logA('فاتورة شراء', '#' + puNo + ' — ' + fmt(total)); db.purchases.unshift({ id: puId, no: puNo, date: new Date().toISOString(), supplierId: pSup, items: pLines, discount: disc, total, paid });
     save(); $('purModal').classList.add('hidden'); renderAll();
 }
 function editPurchase(id) {
-    const pu = db.purchases.find(x => x.id == id); if (!pu) return; const old = pu.total;
+    const pu = db.purchases.find(x => x.id == id); if (!pu || pu.cancelled) return; const old = pu.total;
     pu.items.forEach(l => { const v = parseFloat(prompt(`سعر شراء «${l.name}» (${unitLabel(l.unit)}):`, l.price)); if (v >= 0) l.price = v; });
     const d = parseFloat(prompt('التخفيض بالدينار:', pu.discount || 0)); if (d >= 0) pu.discount = d;
     const sub = pu.items.reduce((s, l) => s + l.qty * l.price, 0); pu.discount = Math.min(pu.discount || 0, sub); pu.total = sub - pu.discount;
@@ -779,14 +808,15 @@ function editPurchase(id) {
     pu.paid = Math.min(pu.paid, pu.total); save(); renderAll();
 }
 function delPurchase(id) {
-    const pu = db.purchases.find(x => x.id == id); if (!pu || !confirm('إلغاء فاتورة الشراء؟ سيُنقص المخزون ويُخصم الدين.')) return;
-    pu.items.forEach(l => { const p = getP(l.pid); if (p) p.stock = Math.max(0, p.stock - l.need); });
+    const pu = db.purchases.find(x => x.id == id); if (!pu || pu.cancelled || !confirm('إلغاء فاتورة الشراء؟ سيُنقص المخزون ويُخصم الدين.')) return;
+    for (const l of pu.items) { const p = getP(l.pid); if (p && p.stock - l.need < -1e-9) return alert('لا يمكن الإلغاء: مخزون «' + p.name + '» أقل من الكمية المشتراة (بيع جزء منها).'); }
+    pu.items.forEach(l => { const p = getP(l.pid); if (p) mv(p, -l.need, 'إلغاء شراء #' + (pu.no || ''), pu.id); });
     const su = db.suppliers.find(s => s.id == pu.supplierId); if (su) su.debt = Math.max(0, su.debt - (pu.total - pu.paid));
-    db.purchases = db.purchases.filter(x => x.id != id); save(); renderAll();
+    pu.cancelled = true; logA('إلغاء فاتورة شراء', '#' + (pu.no || pu.id) + ' — ' + fmt(pu.total)); save(); renderAll();
 }
 function renderPurchases() {
     $('purchasesList').innerHTML = db.purchases.map(pu => { const su = db.suppliers.find(s => s.id == pu.supplierId);
-        return `<tr><td class="p-2.5">${new Date(pu.date).toLocaleString('ar-DZ')}</td><td class="p-2.5">${esc(su ? su.name : '—')}</td><td class="p-2.5">${pu.items.map(l => `${esc(l.name)} ×${fmtQty(l.qty, l.unit)} @ ${fmt(l.price)}${pl(l.unit)} = ${fmt(l.qty * l.price)}`).join('<br>')}</td><td class="p-2.5 font-bold text-amber-300">${fmt(pu.total)}${pu.discount ? `<div class="text-[10px] text-rose-400">تخفيض ${fmt(pu.discount)}</div>` : ''}</td><td class="p-2.5">${fmt(pu.paid)}</td><td class="p-2.5 text-center whitespace-nowrap"><button onclick="editPurchase(${pu.id})" class="text-amber-400 mx-1">✏️</button><button onclick="delPurchase(${pu.id})" class="text-rose-400 mx-1">🗑️</button></td></tr>`; }).join('');
+        return `<tr ${pu.cancelled ? 'style="opacity:.5;text-decoration:line-through"' : ''}><td class="p-2.5">${pu.no ? '<b>#' + pu.no + '</b> ' : ''}${new Date(pu.date).toLocaleString('ar-DZ')}${pu.cancelled ? ' ❌ملغاة' : ''}</td><td class="p-2.5">${esc(su ? su.name : '—')}</td><td class="p-2.5">${pu.items.map(l => `${esc(l.name)} ×${fmtQty(l.qty, l.unit)} @ ${fmt(l.price)}${pl(l.unit)} = ${fmt(l.qty * l.price)}`).join('<br>')}</td><td class="p-2.5 font-bold text-amber-300">${fmt(pu.total)}${pu.discount ? `<div class="text-[10px] text-rose-400">تخفيض ${fmt(pu.discount)}</div>` : ''}</td><td class="p-2.5">${fmt(pu.paid)}</td><td class="p-2.5 text-center whitespace-nowrap"><button onclick="editPurchase(${pu.id})" class="text-amber-400 mx-1">✏️</button><button onclick="delPurchase(${pu.id})" class="text-rose-400 mx-1">🗑️</button></td></tr>`; }).join('');
 }
 
 /* ---------- Sales invoices card under purchases ---------- */
@@ -817,10 +847,10 @@ $('view-invoices').insertAdjacentHTML('afterend', `<div id="view-finance" class=
 
 const paidOf = i => i.paid ?? (i.type === 'CASH' ? i.total : 0), owed = i => i.type === 'CREDIT' ? Math.max(0, i.total - paidOf(i)) : 0;
 const sumBy = (arr, f) => arr.reduce((s, x) => s + (+f(x) || 0), 0);
-const stockValue = () => sumBy(db.products, p => p.stock * (p.type === 'WEIGHT' ? p.costKg : p.costPiece));
-const cardNow = () => sumBy(db.invoices.filter(i => i.method === 'card'), paidOf);
-const cashNow = () => (+db.settings.cash || 0) + sumBy(db.invoices.filter(i => i.method !== 'card'), paidOf)
-    + sumBy(db.payments.filter(p => p.kind === 'CUST'), p => p.amount) - sumBy(db.purchases, p => p.paid)
+const stockValue = () => sumBy(actProds(), p => p.stock * (p.type === 'WEIGHT' ? p.costKg : p.costPiece));
+const cardNow = () => sumBy(liveInv().filter(i => i.method === 'card'), paidOf);
+const cashNow = () => (+db.settings.cash || 0) + sumBy(liveInv().filter(i => i.method !== 'card'), paidOf)
+    + sumBy(db.payments.filter(p => p.kind === 'CUST'), p => p.amount) - sumBy(livePur(), p => p.paid)
     - sumBy(db.payments.filter(p => p.kind === 'SUP'), p => p.amount) - sumBy(db.expenses, e => e.amount);
 function setSetting(k, v) { db.settings[k] = parseFloat(v) || 0; save(); renderFinance(); }
 function addExpense() {
@@ -848,7 +878,7 @@ function renderFinance() {
         : '<p class="text-gray-300">رأس المال دون النصاب، فلا زكاة حاليًا.</p>')
         + '<p class="text-[11px] text-gray-500 pt-1">تقدير تقريبي: تُشترط مرور سنة هجرية على بلوغ النصاب. راجع أهل العلم للتفاصيل.</p>';
     const m = new Date(), inMonth = d => { const x = new Date(d); return x.getMonth() === m.getMonth() && x.getFullYear() === m.getFullYear(); };
-    const exM = sumBy(db.expenses.filter(e => inMonth(e.date)), e => e.amount), prM = sumBy(db.invoices.filter(i => inMonth(i.date)), i => i.profit), net = prM - exM;
+    const exM = sumBy(db.expenses.filter(e => inMonth(e.date)), e => e.amount), prM = sumBy(liveInv().filter(i => inMonth(i.date)), i => i.profit), net = prM - exM;
     $('exMonth').textContent = fmt(exM); $('netMonth').textContent = fmt(net); $('netMonth').className = net < 0 ? 'text-rose-400' : 'text-emerald-400';
     if (document.activeElement !== $('setCash')) $('setCash').value = db.settings.cash || '';
     if (document.activeElement !== $('setGold')) $('setGold').value = db.settings.gold || '';
@@ -857,22 +887,47 @@ function renderFinance() {
 
 /* ---------- Backup export / import ---------- */
 $('clock').insertAdjacentHTML('afterend', `<button onclick="exportData()" class="text-xs px-3 py-1.5 rounded-xl border border-emerald-500/30 bg-gray-900/60 text-emerald-400 font-bold">⬇️ نسخة احتياطية</button><button onclick="$('importFile').click()" class="text-xs px-3 py-1.5 rounded-xl border border-amber-500/30 bg-gray-900/60 text-amber-300 font-bold">⬆️ استرجاع</button><input id="importFile" type="file" accept=".json,application/json" class="hidden" onchange="importData(this)">`);
-function exportData() {
-    const blob = new Blob([JSON.stringify({ app: 'simou-pos', date: new Date().toISOString(), data: db })], { type: 'application/json' });
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-    a.download = 'simou-backup-' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(a); a.click(); a.remove();
+const SCHEMA = 2, DB_KEYS = ['products', 'customers', 'suppliers', 'invoices', 'purchases', 'expenses', 'payments', 'audit', 'ledger'];
+async function exportData(silent) {
+    try {
+        const cs = await sha(JSON.stringify(db));
+        const out = JSON.stringify({ app: 'simou-pos', schema: SCHEMA, appVersion: APP_VERSION, date: new Date().toISOString(), checksum: cs, data: db });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([out], { type: 'application/json' }));
+        a.download = 'simou-backup-v' + APP_VERSION + '-' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(a); a.click(); a.remove();
+        try { localStorage.setItem('sp_lastbk', String(Date.now())); } catch {}
+        if (silent !== true) toast('تم تحميل النسخة الاحتياطية ✔');
+    } catch (e) { toast('⚠️ فشل إنشاء النسخة الاحتياطية: ' + (e.message || e), 'err'); }
+}
+function validateBackup(o) {
+    if (!o || o.app !== 'simou-pos' || !o.data || typeof o.data !== 'object') return 'الملف ليس نسخة Simou POS';
+    if ((o.schema || 1) > SCHEMA) return 'النسخة من إصدار أحدث من تطبيقك، حدّث التطبيق أولاً';
+    const d = o.data;
+    for (const k of DB_KEYS) if (d[k] !== undefined && !Array.isArray(d[k])) return 'جدول «' + k + '» تالف';
+    if (!Array.isArray(d.products) || !Array.isArray(d.invoices)) return 'بيانات ناقصة';
+    const ok = v => typeof +v === 'number' && isFinite(+v);
+    for (const p of d.products) if (!p || p.id == null || !p.name || !ok(p.stock)) return 'يوجد منتج غير صالح';
+    for (const i of d.invoices) if (!i || i.id == null || !ok(i.total) || !Array.isArray(i.items)) return 'توجد فاتورة غير صالحة';
+    for (const c of d.customers || []) if (!c || c.id == null || !ok(c.debt)) return 'يوجد زبون غير صالح';
+    return null;
+}
+async function applyBackup(d, label) {
+    try { localStorage.setItem('sp_prerestore', JSON.stringify({ t: Date.now(), db })); } catch { await exportData(true); toast('حُمّلت نسخة من بياناتك الحالية قبل الاسترجاع'); }
+    for (const k of DB_KEYS) db[k] = Array.isArray(d[k]) ? d[k] : [];
+    db.settings = Object.assign({ cash: 0, gold: 0 }, d.settings || {});
+    logA('استرجاع نسخة احتياطية', label || ''); save(); renderAll(); toast('تم استرجاع البيانات ✔');
 }
 function importData(el) {
     const f = el.files[0]; if (!f) return;
     const r = new FileReader();
-    r.onload = () => {
+    r.onload = async () => {
         try {
-            const d = JSON.parse(r.result).data;
-            if (!d || !Array.isArray(d.products) || !Array.isArray(d.invoices)) throw 0;
-            if (!confirm('سيتم استبدال كل البيانات الحالية بالنسخة الاحتياطية. متأكد؟')) return;
-            for (const k in db) if (d[k] !== undefined) db[k] = d[k];
-            save(); renderAll(); toast('تم استرجاع البيانات ✔');
-        } catch { alert('ملف غير صالح'); }
+            let o; try { o = JSON.parse(r.result); } catch { return alert('الملف تالف (ليس JSON صالحاً)'); }
+            const err = validateBackup(o); if (err) return alert('❌ ' + err);
+            if (o.checksum && o.checksum !== await sha(JSON.stringify(o.data))) return alert('❌ الملف تالف أو تم تعديله (فشل فحص السلامة)');
+            const d = o.data;
+            if (!confirm(`استرجاع نسخة بتاريخ ${o.date ? new Date(o.date).toLocaleString('ar-DZ') : '؟'}\n${d.products.length} منتج، ${d.invoices.length} فاتورة، ${(d.customers || []).length} زبون.\nسيتم استبدال كل البيانات الحالية (تُحفظ نسخة منها تلقائياً). متأكد؟`)) return;
+            await applyBackup(d, f.name);
+        } catch (e) { alert('تعذر الاسترجاع: ' + (e.message || e)); }
         el.value = '';
     };
     r.readAsText(f);
@@ -880,7 +935,7 @@ function importData(el) {
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 
 /* ---------- Pro: KPI dashboard, toast, receipt ---------- */
-$('view-pos').insertAdjacentHTML('beforebegin', '<div id="kpi" class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4"></div>');
+$('view-pos').insertAdjacentHTML('beforebegin', '<div id="kpi" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 mb-4"></div>');
 function toast(m, type) {
     const t = document.createElement('div'); t.textContent = m;
     t.className = 'fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-5 py-3 rounded-2xl font-bold text-sm shadow-2xl ' + (type === 'err' ? 'bg-rose-600 text-white' : 'gold-gradient text-gray-950');
@@ -889,19 +944,27 @@ function toast(m, type) {
 function renderKpi() {
     const k = $('kpi'); if (!k) return;
     k.classList.toggle('hidden', $('view-pos').classList.contains('hidden'));
-    const today = new Date().toDateString(), t = db.invoices.filter(i => new Date(i.date).toDateString() === today);
-    const low = db.products.filter(p => p.stock <= (p.type === 'WEIGHT' ? 1 : 5)).length, debt = db.customers.reduce((s, c) => s + c.debt, 0);
-    const c = (l, v, col) => `<div><div class="l">${l}</div><div class="v ${col}">${v}</div></div>`;
-    k.innerHTML = c('💰 مبيعات اليوم', fmt(t.reduce((s, i) => s + i.total, 0)), 'text-emerald-400') + c('📈 أرباح اليوم', fmt(t.reduce((s, i) => s + i.profit, 0)), 'text-amber-300')
-        + c('⚠️ مخزون منخفض', low, low ? 'text-rose-400' : 'text-gray-300') + c('📝 ديون الزبائن', fmt(debt), 'text-rose-300');
+    const today = new Date().toDateString(), same = d => new Date(d).toDateString() === today, t = liveInv().filter(i => same(i.date)), pT = livePur().filter(x => same(x.date));
+    const ap = actProds(), low = ap.filter(LOW).length, debt = db.customers.reduce((s, c) => s + c.debt, 0);
+    const c = (l, v, col, go) => `<div ${go ? `onclick="${go}" style="cursor:pointer"` : ''}><div class="l">${l}</div><div class="v ${col}">${v}</div></div>`;
+    k.innerHTML = c('💰 مبيعات اليوم', fmt(t.reduce((s, i) => s + i.total, 0)), 'text-emerald-400', "showReport('day')") + c('📈 أرباح اليوم', fmt(t.reduce((s, i) => s + i.profit, 0)), 'text-amber-300', "showReport('day')")
+        + c('⚠️ مخزون منخفض', low, low ? 'text-rose-400' : 'text-gray-300', "invLow=true;switchTab('inventory')") + c('📝 ديون الزبائن', fmt(debt), 'text-rose-300', "switchTab('customers')")
+        + c('🛒 مشتريات اليوم', fmt(pT.reduce((s, x) => s + x.total, 0)), 'text-sky-300', "switchTab('suppliers')") + c('📦 القطع في المخزون', fmt(sumBy(ap, p => p.stock)), 'text-gray-300', "invLow=false;switchTab('inventory')");
 }
 function printInvoice(id) {
-    const inv = db.invoices.find(i => i.id == id); if (!inv) return;
-    const cu = db.customers.find(x => x.id == inv.customerId);
+    const inv = db.invoices.find(i => i.id == id); if (!inv) return; if (inv.cancelled) return toast('الفاتورة ملغاة', 'err');
+    const cu = db.customers.find(x => x.id == inv.customerId), pp = db.settings.paper || '80';
+    const W = pp === '58' ? 48 : pp === 'A4' ? 190 : 72, fs = pp === '58' ? 11 : pp === 'A4' ? 14 : 12;
     const rows = inv.items.map(c => `<tr><td>${esc(c.name)}<br><small>${fmtQty(c.qty, c.unit)} × ${fmt(c.price)}${pl(c.unit)}</small></td><td style="text-align:left">${fmt(c.qty * c.price)}</td></tr>`).join('');
+    const paid = paidOf(inv), rest = owed(inv), change = inv.change || 0, R = (a, b) => `<div class="r"><span>${a}</span><span>${b}</span></div>`;
     const w = window.open('', '_blank', 'width=380,height=640'); if (!w) return toast('اسمح بالنوافذ المنبثقة', 'err');
-    w.document.write(`<html dir="rtl"><head><meta charset="utf-8"><title>فاتورة</title><style>body{font-family:Tahoma,Arial;width:72mm;margin:auto;font-size:12px}h2,p{text-align:center;margin:4px 0}table{width:100%;border-collapse:collapse}td{padding:4px 0;border-bottom:1px dashed #999}.t{font-size:16px;font-weight:bold}</style></head><body><h2>Simou POS</h2><p>${new Date(inv.date).toLocaleString('ar-DZ')}</p>${cu ? `<p>الزبون: ${esc(cu.name)}</p>` : ''}<table>${rows}</table>${inv.discount ? `<p>تخفيض: ${fmt(inv.discount)}</p>` : ''}<p class="t">الإجمالي: ${fmt(inv.total)} د.ج</p><p>${inv.type === 'CASH' ? (inv.method === 'card' ? 'مدفوع بالبطاقة' : 'مدفوع كاش') : paidOf(inv) > 0 ? 'مدفوع ' + fmt(paidOf(inv)) + (inv.method === 'card' ? ' (بطاقة)' : '') + ' — المتبقي ' + fmt(owed(inv)) : 'كريدي'}</p><p>شكرًا لزيارتكم</p><script>onload=()=>print()<\/script></body></html>`);
+    w.document.write(`<html dir="rtl"><head><meta charset="utf-8"><title>فاتورة ${inv.no || ''}</title><style>@page{size:${pp === 'A4' ? 'A4' : W + 'mm auto'};margin:${pp === 'A4' ? '12mm' : '2mm'}}body{font-family:Tahoma,Arial;width:${W}mm;margin:auto;font-size:${fs}px}h2,p{text-align:center;margin:4px 0}table{width:100%;border-collapse:collapse}td{padding:4px 0;border-bottom:1px dashed #999}.t{font-size:${fs + 4}px;font-weight:bold}.r{display:flex;justify-content:space-between;margin:2px 0}</style></head><body><h2>Simou POS</h2><p>فاتورة رقم: <b>${inv.no || inv.id}</b></p><p>${new Date(inv.date).toLocaleString('ar-DZ')}</p>${cu ? `<p>الزبون: ${esc(cu.name)}</p>` : ''}<table>${rows}</table>${inv.discount ? R('الخصم', fmt(inv.discount)) : ''}<p class="t">الإجمالي: ${fmt(inv.total)} د.ج</p>${R('المدفوع (' + (inv.method === 'card' ? 'بطاقة' : 'كاش') + ')', fmt(paid))}${inv.recv > inv.total && inv.method !== 'card' ? R('المستلم', fmt(inv.recv)) : ''}${change > 0 ? R('الباقي للزبون', fmt(change)) : ''}${rest > 0 ? R('المتبقي (دين)', fmt(rest)) : ''}<p>شكراً لزيارتكم</p><script>onload=()=>setTimeout(()=>print(),300)<\/script></body></html>`);
     w.document.close();
+}
+function offerPrint(id) {
+    const o = $('prn'); if (o) o.remove();
+    document.body.insertAdjacentHTML('beforeend', `<div id="prn" style="position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:9000;background:#111827;color:#e5e7eb;border:1px solid #34d399;border-radius:16px;padding:10px 14px;display:flex;gap:10px;align-items:center;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.4)">✔ تمت البيعة<button onclick="printInvoice(${id});$('prn').remove()" style="background:#10b981;color:#fff;border-radius:10px;padding:6px 12px;font-weight:700">🖨️ طباعة / PDF</button><button onclick="$('prn').remove()" style="color:#9ca3af">✖</button></div>`);
+    setTimeout(() => { const x = $('prn'); if (x) x.remove(); }, 12000);
 }
 
 /* ---------- Theme toggle (light = professional, dark = premium) ---------- */
@@ -922,11 +985,11 @@ document.body.insertAdjacentHTML('beforeend', `<div id="invEditModal" class="hid
 <button onclick="saveInvoiceEdit()" class="w-full gold-gradient text-gray-950 font-extrabold py-3 rounded-xl">حفظ التعديلات</button></div></div>`);
 let eInv = null;
 function editInvoice(id) {
-    const inv = db.invoices.find(i => i.id == id); if (!inv) return;
+    const inv = db.invoices.find(i => i.id == id); if (!inv) return; if (inv.cancelled) return toast('الفاتورة ملغاة', 'err');
     eInv = JSON.parse(JSON.stringify(inv)); eInv.items.forEach(l => { l.k = l.qty ? l.need / l.qty : 1; });
     $('eCust').innerHTML = '<option value="">— زبون عادي —</option>' + db.customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
     $('eCust').value = eInv.customerId || ''; $('eType').value = eInv.type === 'CASH' && eInv.method === 'card' ? 'CARD' : eInv.type; $('eDisc').value = eInv.discount || '';
-    $('eProd').innerHTML = db.products.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    $('eProd').innerHTML = actProds().map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
     eProdChange(); $('invEditModal').classList.remove('hidden'); renderEdit();
 }
 function eProdChange() {
@@ -947,19 +1010,19 @@ function renderEdit() {
     $('eTotal').textContent = fmt(sub - d);
 }
 function saveInvoiceEdit() {
-    const o = db.invoices.find(i => i.id == eInv.id); if (!o) return;
+    const o = db.invoices.find(i => i.id == eInv.id); if (!o || o.cancelled) return;
     const items = eInv.items.filter(l => l.qty > 0); if (!items.length) return alert('الفاتورة فارغة، استعمل 🗑️ لإلغائها');
     const sel = $('eType').value, type = sel === 'CARD' ? 'CASH' : sel, cid = $('eCust').value || null;
     if (type === 'CREDIT' && !cid) return alert('اختر الزبون للكريدي');
     const delta = {}; o.items.forEach(c => { delta[c.pid] = (delta[c.pid] || 0) + c.need; }); items.forEach(l => { delta[l.pid] = (delta[l.pid] || 0) - l.qty * l.k; });
     for (const pid in delta) { const p = getP(pid); if (p && p.stock + delta[pid] < -1e-9) return alert('المخزون غير كافٍ لـ «' + p.name + '»'); }
-    for (const pid in delta) { const p = getP(pid); if (p) { p.stock += delta[pid]; if (p.type === 'WEIGHT') p.stock = Math.round(p.stock * 1000) / 1000; } }
+    for (const pid in delta) { const p = getP(pid); if (p && Math.abs(delta[pid]) > 1e-9) mv(p, delta[pid], 'تعديل فاتورة #' + (o.no || ''), o.id); }
     const sub = items.reduce((s, l) => s + l.qty * l.price, 0), disc = Math.min(sub, Math.max(0, +$('eDisc').value || 0)), total = sub - disc;
     if (o.type === 'CREDIT') { const cu = db.customers.find(x => x.id == o.customerId); if (cu) cu.debt = Math.max(0, cu.debt - owed(o)); }
     const keep = type === 'CREDIT' && o.type === 'CREDIT' ? Math.min(total, paidOf(o)) : 0;
     if (type === 'CREDIT') { const cu = db.customers.find(x => x.id == cid); if (cu) cu.debt += total - keep; }
     items.forEach(l => { l.need = l.qty * l.k; delete l.k; });
-    Object.assign(o, { items, discount: disc, total, profit: items.reduce((s, l) => s + l.qty * (l.price - l.cost), 0) - disc, type, customerId: cid, paid: type === 'CASH' ? total : keep, method: sel === 'CARD' ? 'card' : type === 'CASH' ? 'cash' : o.method });
+    logA('تعديل فاتورة', '#' + (o.no || o.id) + ': ' + fmt(o.total) + '→' + fmt(total)); Object.assign(o, { items, discount: disc, total, profit: items.reduce((s, l) => s + l.qty * (l.price - l.cost), 0) - disc, type, customerId: cid, paid: type === 'CASH' ? total : keep, method: sel === 'CARD' ? 'card' : type === 'CASH' ? 'cash' : o.method });
     save(); $('invEditModal').classList.add('hidden'); renderAll(); toast('تم تعديل الفاتورة ✔');
 }
 
@@ -1216,6 +1279,13 @@ document.body.insertAdjacentHTML('beforeend', `<div id="setModal" onclick="if(ev
 <div class="text-xs text-gray-400 mt-4 mb-1">💬 راسلنا</div>
 <div class="bg-gray-900/60 border border-gray-800 rounded-xl p-3 space-y-2"><div class="flex items-center justify-between text-xs"><span>رقم الواتساب</span><b id="setWaNum" dir="ltr" class="font-mono"></b><button onclick="copyWa()" class="text-emerald-400 font-bold">نسخ</button></div>
 <a id="setWa" target="_blank" rel="noopener" class="flex items-center justify-center gap-2 rounded-xl py-2.5 font-extrabold" style="background:#25D366;color:#fff"><svg style="width:20px;height:20px"><use href="#i-wa"/></svg>راسلنا عبر واتساب</a></div>
+<div class="text-xs text-gray-400 mt-4 mb-1">🛠️ إدارة البيانات</div>
+<div class="grid grid-cols-2 gap-2">
+<button onclick="closeSettings();showReport('day')" class="text-emerald-400 font-bold border border-emerald-500/30 rounded-xl py-2 text-sm">📊 التقارير</button>
+<button onclick="closeSettings();showAudit()" class="text-emerald-400 font-bold border border-emerald-500/30 rounded-xl py-2 text-sm">📜 سجل العمليات</button>
+<button onclick="closeSettings();showAuto()" class="text-emerald-400 font-bold border border-emerald-500/30 rounded-xl py-2 text-sm">💾 النسخ التلقائية</button>
+<button onclick="closeSettings();runTests()" class="text-emerald-400 font-bold border border-emerald-500/30 rounded-xl py-2 text-sm">🧪 اختبار النظام</button></div>
+<label class="flex items-center justify-between bg-gray-900/60 border border-gray-800 rounded-xl p-3 text-xs mt-2"><span>🖨️ ورق الطباعة</span><select id="setPaper" onchange="db.settings.paper=this.value;save()" class="bg-transparent font-bold"><option value="58">58mm</option><option value="80">80mm</option><option value="A4">A4</option></select></label>
 <div class="text-xs text-gray-400 mt-4 mb-1">🔄 التحديثات</div>
 <div class="bg-gray-900/60 border border-gray-800 rounded-xl p-3 flex items-center justify-between text-xs"><span>الإصدار الحالي: <b id="setVer"></b></span><button onclick="checkUpdate(true)" class="text-emerald-400 font-bold">🔄 تحقق الآن</button></div>
 <div class="text-xs text-gray-400 mt-2">🔐 مفتاح التفعيل: <b id="setKid" class="font-mono"></b></div>
@@ -1228,7 +1298,7 @@ const hdrBox = $('clock').parentElement;
 const capCard = $('setCash').closest('.glass-card'); capCard.className = 'space-y-3'; $('setCapital').appendChild(capCard);
 hdrBox.insertAdjacentHTML('beforeend', '<button onclick="openSettings()" class="text-xs px-3 py-1.5 rounded-xl border border-emerald-500/40 bg-gray-900/60 text-emerald-300 font-bold">⚙️ الإعدادات</button>');
 function copyWa() { const n = '+' + PHONE; const done = () => toast('تم نسخ الرقم ' + n); if (navigator.clipboard) navigator.clipboard.writeText(n).then(done, done); else done(); }
-function openSettings() { try { $('setRem').checked = !!localStorage.getItem('sp_rem'); } catch {} $('setKid').textContent = LIC_PUB.x.slice(0, 6); $('setWaNum').textContent = '+' + PHONE.replace(/^(\d{3})(\d{3})(\d{2})(\d{2})(\d{2})$/, '$1 $2 $3 $4 $5'); $('setWa').href = 'https://wa.me/' + PHONE + '?text=' + encodeURIComponent('السلام عليكم، أحتاج مساعدة في Simou POS.\nرقم جهازي: ' + lic.dev + '\nالإصدار: ' + APP_VERSION); $('setVer').textContent = APP_VERSION; $('setVer2').textContent = 'v' + APP_VERSION; $('setQ').value = acct && acct.q || ''; $('setUser').textContent = acct ? acct.u : '-'; $('setDev').textContent = lic.dev; $('setModal').style.display = 'flex'; }
+function openSettings() { $('setPaper').value = db.settings.paper || '80'; try { $('setRem').checked = !!localStorage.getItem('sp_rem'); } catch {} $('setKid').textContent = LIC_PUB.x.slice(0, 6); $('setWaNum').textContent = '+' + PHONE.replace(/^(\d{3})(\d{3})(\d{2})(\d{2})(\d{2})$/, '$1 $2 $3 $4 $5'); $('setWa').href = 'https://wa.me/' + PHONE + '?text=' + encodeURIComponent('السلام عليكم، أحتاج مساعدة في Simou POS.\nرقم جهازي: ' + lic.dev + '\nالإصدار: ' + APP_VERSION); $('setVer').textContent = APP_VERSION; $('setVer2').textContent = 'v' + APP_VERSION; $('setQ').value = acct && acct.q || ''; $('setUser').textContent = acct ? acct.u : '-'; $('setDev').textContent = lic.dev; $('setModal').style.display = 'flex'; }
 function closeSettings() { $('setModal').style.display = 'none'; }
 function logout() { try { sessionStorage.removeItem('sp_in'); localStorage.removeItem('sp_rem'); } catch {} closeSettings(); $('acP').value = ''; showAcct(); }
 $('licModal').remove();
@@ -1236,7 +1306,7 @@ $('licModal').remove();
 renderAll(); renderCart(); selectUnit('BOX'); __ready = true; renderLic();
 
 /* ---------- App update notifications (reads version.json from the server) ---------- */
-var APP_VERSION = '1.0.4', updInfo = null, lastChk = 0;
+var APP_VERSION = '1.1.0', updInfo = null, lastChk = 0;
 const verGt = (a, b) => { const A = String(a).split('.').map(Number), B = String(b).split('.').map(Number); for (let i = 0; i < Math.max(A.length, B.length); i++) { const x = A[i] || 0, y = B[i] || 0; if (x !== y) return x > y; } return false; };
 const escU = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 async function checkUpdate(manual) {
@@ -1265,6 +1335,99 @@ async function applyUpdate() {
     } catch {}
     location.replace(location.pathname + '?v=' + encodeURIComponent(updInfo ? updInfo.version : Date.now()));
 }
+/* ---------- v1.1: inventory, reports, audit, auto-backup, self-tests ---------- */
+$('tab-products').insertAdjacentHTML('afterend', `<button onclick="switchTab('inventory')" id="tab-inventory" class="tab-btn bg-gray-800 text-gray-400 hover:text-white px-5 py-2.5 rounded-xl transition flex items-center gap-2">📋 الجرد والعدّ</button>`);
+$('view-products').insertAdjacentHTML('afterend', `<div id="view-inventory" class="hidden"><div class="glass-card p-5 rounded-2xl">
+<div class="flex flex-wrap gap-2 items-center justify-between mb-3"><h2 class="font-bold text-white">📋 جرد وعدّ المنتجات</h2><div class="flex gap-2"><input id="invQ" oninput="renderInventory()" placeholder="بحث بالاسم أو المرجع" class="${inp} text-sm"><button id="invLowBtn" onclick="invLow=!invLow;renderInventory()" class="px-3 rounded-xl border text-xs font-bold text-gray-300">⚠️ المنخفض فقط</button></div></div>
+<div id="invSum" class="text-xs text-gray-400 mb-2"></div>
+<div class="overflow-x-auto"><table class="w-full text-sm text-right"><thead class="text-xs text-gray-400"><tr><th class="p-2">المنتج</th><th class="p-2">المرجع</th><th class="p-2">المدخلة</th><th class="p-2">المباعة</th><th class="p-2">المتبقية</th><th class="p-2">الشراء</th><th class="p-2">البيع</th><th class="p-2"></th></tr></thead><tbody id="invList"></tbody></table></div></div></div>`);
+function soldMap() { const m = {}; liveInv().forEach(i => i.items.forEach(c => { m[c.pid] = (m[c.pid] || 0) + c.need; })); return m; }
+function renderInventory() {
+    const q = ($('invQ').value || '').trim().toLowerCase(), sm = soldMap();
+    let ps = actProds().filter(p => !q || p.name.toLowerCase().includes(q) || (p.barcode || '').toLowerCase().includes(q));
+    const low = ps.filter(LOW).length; if (invLow) ps = ps.filter(LOW);
+    $('invSum').textContent = `المنتجات: ${ps.length} — منخفضة: ${low} — القطع الموجودة: ${fmt(sumBy(actProds(), p => p.stock))}`;
+    $('invLowBtn').style.borderColor = invLow ? '#f43f5e' : '#4b5563';
+    $('invList').innerHTML = ps.map(p => { const w = p.type === 'WEIGHT', sold = sm[p.id] || 0, u = w ? ' kg' : '';
+        return `<tr class="border-b border-gray-800"><td class="p-2 font-bold">${esc(p.name)}</td><td class="p-2 text-xs text-gray-400">${esc(p.barcode || '—')}</td><td class="p-2">${+(p.stock + sold).toFixed(3)}${u}</td><td class="p-2">${+sold.toFixed(3)}${u}</td><td class="p-2 font-bold ${LOW(p) ? 'text-rose-400' : 'text-emerald-400'}">${+p.stock.toFixed(3)}${u}${LOW(p) ? ' ⚠️' : ''}</td><td class="p-2">${fmt(w ? p.costKg : p.costPiece)}</td><td class="p-2">${fmt(w ? p.priceKg : p.pricePiece)}</td><td class="p-2"><button onclick="adjStock(${p.id})" class="text-amber-400 text-xs font-bold">✏️ عدّ</button></td></tr>`; }).join('') || '<tr><td colspan="8" class="p-4 text-center text-gray-500">لا توجد منتجات</td></tr>';
+}
+function adjStock(id) {
+    const p = getP(id), v = prompt('الكمية الفعلية الموجودة لـ «' + p.name + '» (عدّ يدوي):', p.stock); if (v === null) return;
+    const n = parseFloat(v); if (!(n >= 0)) return toast('كمية غير صالحة', 'err'); if (Math.abs(n - p.stock) < 1e-9) return;
+    const note = prompt('سبب التعديل (اختياري):', 'جرد') || 'جرد', old = p.stock; mv(p, n - old, 'تعديل جرد: ' + note); logA('تعديل مخزون (جرد)', p.name + ': ' + old + '→' + n + ' — ' + note); save(); renderAll();
+}
+document.body.insertAdjacentHTML('beforeend', `<div id="infoModal" onclick="if(event.target===this)closeInfo()" style="display:none;position:fixed;inset:0;z-index:115;background:rgba(3,7,12,.65);backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:12px"><div class="glass-card rounded-2xl p-4 w-full" style="max-width:520px;max-height:92vh;overflow-y:auto"><div class="flex justify-between items-center border-b border-gray-800 pb-2 mb-3"><h3 id="infoT" class="font-extrabold text-white"></h3><button onclick="closeInfo()" class="text-rose-400 font-bold">✖</button></div><div id="infoB"></div></div></div>`);
+function openInfo(t, h) { $('infoT').textContent = t; $('infoB').innerHTML = h; $('infoModal').style.display = 'flex'; }
+function closeInfo() { $('infoModal').style.display = 'none'; }
+function showReport(p) {
+    const start = new Date(); start.setHours(0, 0, 0, 0); if (p === 'week') start.setDate(start.getDate() - 6); if (p === 'month') start.setDate(1);
+    const inR = d => new Date(d) >= start, inv = liveInv().filter(i => inR(i.date)), pur = livePur().filter(x => inR(x.date)), exp = db.expenses.filter(e => inR(e.date));
+    const sales = sumBy(inv, i => i.total), profit = sumBy(inv, i => i.profit), ex = sumBy(exp, e => e.amount);
+    const cash = sumBy(inv.filter(i => i.method !== 'card'), paidOf), card = sumBy(inv.filter(i => i.method === 'card'), paidOf), cred = sumBy(inv, owed);
+    const tp = {}; inv.forEach(i => i.items.forEach(c => { const r = tp[c.name] || (tp[c.name] = { q: 0, v: 0, pf: 0, u: c.unit }); r.q += c.qty; r.v += c.qty * c.price; r.pf += c.qty * (c.price - c.cost); }));
+    const top = Object.entries(tp).sort((a, b) => b[1].v - a[1].v).slice(0, 5);
+    const tab = (k, l) => `<button onclick="showReport('${k}')" class="flex-1 py-2 rounded-xl text-sm font-bold border ${p === k ? 'border-emerald-500 text-emerald-400' : 'border-gray-700 text-gray-400'}">${l}</button>`;
+    const row = (l, v, c) => `<div class="flex justify-between py-1.5 border-b border-gray-800 text-sm"><span class="text-gray-400">${l}</span><b class="${c || ''}">${v}</b></div>`;
+    openInfo('📊 التقارير', `<div class="flex gap-2 mb-3">${tab('day', 'اليوم')}${tab('week', '7 أيام')}${tab('month', 'هذا الشهر')}</div>`
+        + row('🧾 عدد الفواتير', inv.length) + row('💰 المبيعات', fmt(sales) + ' د.ج', 'text-emerald-400') + row('📈 الربح الإجمالي', fmt(profit) + ' د.ج', 'text-amber-300')
+        + row('📊 هامش الربح', (sales ? (profit / sales * 100).toFixed(1) : '0.0') + '%') + row('💸 المصاريف', fmt(ex) + ' د.ج', 'text-rose-300') + row('✅ الربح الصافي', fmt(profit - ex) + ' د.ج', profit - ex >= 0 ? 'text-emerald-400' : 'text-rose-400')
+        + row('💵 محصّل كاش', fmt(cash)) + row('💳 محصّل بطاقة', fmt(card)) + row('📝 ديون جديدة', fmt(cred)) + row('🛒 المشتريات', fmt(sumBy(pur, x => x.total)))
+        + `<div class="text-xs text-gray-400 mt-3 mb-1">🏆 الأكثر مبيعاً</div>` + (top.map(([n, r], i) => `<div class="flex justify-between text-sm py-1"><span>${i + 1}. ${esc(n)} <span class="text-gray-500 text-xs">×${+r.q.toFixed(2)}</span></span><span>${fmt(r.v)} <span class="text-emerald-400 text-xs">(+${fmt(r.pf)})</span></span></div>`).join('') || '<div class="text-xs text-gray-500">لا مبيعات</div>'));
+}
+function showAudit() {
+    openInfo('📜 سجل العمليات', db.audit.slice(0, 200).map(a => `<div class="py-1.5 border-b border-gray-800 text-xs"><b class="text-emerald-400">${esc(a.a)}</b> <span class="text-gray-500">— ${esc(a.u)} — ${new Date(a.t).toLocaleString('ar-DZ')}</span><div class="text-gray-300">${esc(a.d)}</div></div>`).join('') || '<div class="text-sm text-gray-500">لا عمليات مسجّلة بعد</div>');
+}
+async function autoSnap(force) {
+    try {
+        if (!force && Date.now() - (+localStorage.getItem('sp_autoT') || 0) < 864e5) return;
+        const slot = ((+localStorage.getItem('sp_autoN') || 0) % 2) + 1;
+        localStorage.setItem('sp_auto' + slot, JSON.stringify({ t: Date.now(), v: APP_VERSION, db }));
+        localStorage.setItem('sp_autoN', String(slot)); localStorage.setItem('sp_autoT', String(Date.now()));
+    } catch { toast('⚠️ تعذر حفظ النسخة التلقائية (المساحة ممتلئة)، حمّل نسخة يدوية', 'err'); }
+}
+function showAuto() {
+    const rows = [1, 2].map(n => { try { const o = JSON.parse(localStorage.getItem('sp_auto' + n)); return o ? `<div class="flex justify-between items-center py-2 border-b border-gray-800 text-sm"><span>${new Date(o.t).toLocaleString('ar-DZ')}<div class="text-xs text-gray-500">${o.db.products.length} منتج — ${o.db.invoices.length} فاتورة</div></span><button onclick="restoreAuto(${n})" class="text-amber-400 font-bold">استرجاع</button></div>` : ''; } catch { return ''; } }).join('');
+    openInfo('💾 النسخ التلقائية', (rows || '<div class="text-sm text-gray-500">لا توجد نسخ بعد (تُنشأ تلقائياً كل 24 ساعة)</div>') + '<button onclick="autoSnap(true).then(showAuto)" class="w-full mt-3 text-emerald-400 font-bold border border-emerald-500/30 rounded-xl py-2 text-sm">➕ إنشاء نسخة الآن</button><div class="text-xs text-gray-500 mt-2">النسخ التلقائية داخل المتصفح فقط. حمّل نسخة يدوية بانتظام لحمايتها من مسح بيانات المتصفح.</div>');
+}
+async function restoreAuto(n) {
+    try { const o = JSON.parse(localStorage.getItem('sp_auto' + n)), err = validateBackup({ app: 'simou-pos', schema: SCHEMA, data: o.db }); if (err) return alert('❌ ' + err); if (!confirm('استرجاع نسخة ' + new Date(o.t).toLocaleString('ar-DZ') + '؟')) return; await applyBackup(o.db, 'نسخة تلقائية'); closeInfo(); } catch (e) { alert('تعذر الاسترجاع: ' + e.message); }
+}
+async function runTests() {
+    const res = [], T = (n, ok) => res.push([n, !!ok]), bak = JSON.stringify(db), oc = window.confirm, oa = window.alert, savedCart = cart;
+    window.confirm = () => true; window.alert = m => { (window.__testAlerts = window.__testAlerts || []).push(m); }; __testing = true;
+    try {
+        db = JSON.parse(bak);
+        db.products.push({ id: 9e9, type: 'PIECE', name: '__test', barcode: '', costBox: 500, itemsBox: 10, costPiece: 50, priceBox: 1000, pricePiece: 100, stock: 10 });
+        db.customers.push({ id: 9e9, name: '__c', phone: '', debt: 0 }); db.suppliers.push({ id: 9e9, name: '__s', debt: 0 }); renderAll();
+        const P = getP(9e9), C = db.customers.find(c => c.id == 9e9), cash0 = cashNow(), n0 = db.invoices.length;
+        const sale = (q, type, recv, cid) => { cart = [{ pid: 9e9, name: '__test', unit: 'PIECE', qty: q, need: q, base: 1, price: 100, cost: 50 }]; $('cartCustomer').value = cid || ''; $('recvAmt').value = recv; payMethod = 'cash'; checkout(type); };
+        sale(2, 'CASH', ''); const i1 = db.invoices[0];
+        T('بيع كاش: خصم المخزون وتسجيل المبلغ', P.stock === 8 && i1.paid === 200 && cashNow() === cash0 + 200);
+        sale(3, 'CASH', '100', 9e9); const i2 = db.invoices[0];
+        T('دفع جزئي: الباقي دين على الزبون', i2.type === 'CREDIT' && i2.paid === 100 && C.debt === 200 && P.stock === 5);
+        delInvoice(i2.id);
+        T('إلغاء فاتورة جزئية: يعيد المخزون ويصفّر الدين', P.stock === 8 && C.debt === 0 && i2.cancelled === true && cashNow() === cash0 + 200);
+        delInvoice(i2.id); T('إلغاء مرتين لا يكرر إرجاع المخزون', P.stock === 8);
+        const n1 = db.invoices.length; sale(100, 'CASH', ''); T('منع البيع بأكثر من المخزون', P.stock === 8 && db.invoices.length === n1);
+        pSup = 9e9; pLines = [{ pid: 9e9, name: '__test', unit: 'PIECE', qty: 10, need: 10, price: 70 }]; $('purPaid').value = ''; confirmPurchase();
+        T('شراء: زيادة المخزون + تكلفة متوسطة متحركة', P.stock === 18 && Math.abs(P.costPiece - (8 * 50 + 10 * 70) / 18) < 1e-6);
+        T('سجل المخزون متوافق مع الرصيد', Math.abs(db.ledger.filter(l => l.pid == 9e9).reduce((s, l) => s + l.d, 0) - (P.stock - 10)) < 1e-9);
+        const pu = db.purchases[0]; sale(15, 'CASH', ''); delPurchase(pu.id);
+        T('منع إلغاء شراء بيع جزء منه', !pu.cancelled);
+        delProduct(9e9); T('إيقاف المنتج لا يحذفه من التاريخ', P.active === false && !!getP(9e9) && !actProds().includes(P) && db.invoices.some(i => i.items.some(c => c.pid == 9e9)));
+        T('نسخة احتياطية سليمة تُقبل', validateBackup({ app: 'simou-pos', schema: SCHEMA, data: db }) === null);
+        T('نسخة تالفة تُرفض', validateBackup({ app: 'simou-pos', data: { products: 'x', invoices: [] } }) !== null && validateBackup({ app: 'other', data: db }) !== null && validateBackup({ app: 'simou-pos', schema: 99, data: db }) !== null);
+        T('فحص السلامة (checksum) ثابت', await sha(JSON.stringify(JSON.parse(JSON.stringify(db)))) === await sha(JSON.stringify(db)));
+        T('سجل العمليات يسجّل الإلغاء والإيقاف', db.audit.some(a => a.a === 'إلغاء فاتورة') && db.audit.some(a => a.a === 'إيقاف منتج'));
+    } catch (e) { T('خطأ غير متوقع: ' + (e.message || e), false); }
+    db = JSON.parse(bak); __testing = false; window.confirm = oc; window.alert = oa; cart = savedCart; payMethod = 'cash'; if ($('prn')) $('prn').remove(); $('recvAmt').value = ''; renderAll(); renderCart();
+    const bad = res.filter(r => r[1] === false).length;
+    window.__testRes = res;
+    openInfo('🧪 اختبار النظام', `<div class="text-sm font-bold mb-2 ${bad ? 'text-rose-400' : 'text-emerald-400'}">${bad ? '❌ ' + bad + ' مشكلة' : '✅ كل الاختبارات نجحت'} (${res.length})</div>` + res.map(r => `<div class="py-1 text-sm border-b border-gray-800">${r[1] ? '✅' : '❌'} ${esc(r[0])}</div>`).join('') + '<div class="text-xs text-gray-500 mt-2">تعمل على نسخة مؤقتة ولا تغيّر بياناتك.</div>');
+}
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch {}
+setTimeout(() => { autoSnap(); const last = +localStorage.getItem('sp_lastbk') || 0; if (db.invoices.length && Date.now() - last > 7 * 864e5 && !$('bkRem')) { document.body.insertAdjacentHTML('beforeend', `<div id="bkRem" style="position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:9000;background:#111827;color:#e5e7eb;border:1px solid #d4af37;border-radius:16px;padding:10px 14px;display:flex;gap:10px;align-items:center;font-size:13px">💾 لم تحمّل نسخة احتياطية منذ مدة<button onclick="exportData();$('bkRem').remove()" style="background:#d4af37;color:#111;border-radius:10px;padding:6px 12px;font-weight:700">تحميل الآن</button><button onclick="$('bkRem').remove()" style="color:#9ca3af">✖</button></div>`); } }, 6000);
+renderAll();
 setTimeout(checkUpdate, 3000); setInterval(checkUpdate, 1800000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(); });
 const tick = () => { $('clock').textContent = new Date().toLocaleString('ar-DZ', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }); };
