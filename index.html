@@ -1075,7 +1075,7 @@ document.body.insertAdjacentHTML('beforeend', `
 <input id="acP" type="password" placeholder="الرمز السري" autocomplete="current-password" style="width:100%;padding:12px;margin:5px 0;border-radius:12px;border:1px solid #374151;background:#0b1220;color:#fff">
 <input id="acP2" type="password" placeholder="أعد كتابة الرمز السري" style="width:100%;padding:12px;margin:5px 0;border-radius:12px;border:1px solid #374151;background:#0b1220;color:#fff">
 <div id="acQBox"><input id="acQ" placeholder="سؤال استرجاع خاص بك (مثال: اسم أول مدرسة لك؟)" style="width:100%;padding:12px;margin:5px 0;border-radius:12px;border:1px solid #374151;background:#0b1220;color:#fff"><input id="acA" placeholder="إجابة السؤال" style="width:100%;padding:12px;margin:5px 0;border-radius:12px;border:1px solid #374151;background:#0b1220;color:#fff"><p style="font-size:11px;color:#9ca3af">تحتاج هذا السؤال لاسترجاع رمزك السري إن نسيته، فاختر إجابة لا يعرفها غيرك.</p></div>
-<button onclick="acctGo()" style="width:100%;margin-top:8px;padding:12px;border-radius:12px;font-weight:800;background:linear-gradient(135deg,#f5d76e,#d4af37);color:#111">متابعة</button><button id="acForgot" onclick="showReset()" style="width:100%;margin-top:10px;font-size:13px;color:#34d399">نسيت الرمز السري؟</button></div>
+<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#9ca3af;margin:10px 0 0"><input id="acRem" type="checkbox" checked style="width:auto;margin:0"> حفظ الدخول على هذا الجهاز</label><div style="font-size:11px;color:#6b7280;margin:2px 0 0">لا تفعّلها على جهاز مشترك.</div><button onclick="acctGo()" style="width:100%;margin-top:8px;padding:12px;border-radius:12px;font-weight:800;background:linear-gradient(135deg,#f5d76e,#d4af37);color:#111">متابعة</button><button id="acForgot" onclick="showReset()" style="width:100%;margin-top:10px;font-size:13px;color:#34d399">نسيت الرمز السري؟</button></div>
 <div id="acReset" style="display:none"><p style="font-size:12px;color:#9ca3af">أجب عن سؤالك الخاص لتعيين رمز جديد:</p><div id="acRQ" style="background:#0b1220;border-radius:12px;padding:10px;margin:6px 0;font-weight:700;color:#f5d76e"></div>
 <input id="acRA" placeholder="إجابتك" style="width:100%;padding:12px;margin:5px 0;border-radius:12px;border:1px solid #374151;background:#0b1220;color:#fff"><input id="acRP" type="password" placeholder="الرمز السري الجديد" style="width:100%;padding:12px;margin:5px 0;border-radius:12px;border:1px solid #374151;background:#0b1220;color:#fff"><input id="acRP2" type="password" placeholder="أعد كتابة الرمز الجديد" style="width:100%;padding:12px;margin:5px 0;border-radius:12px;border:1px solid #374151;background:#0b1220;color:#fff">
 <button onclick="doReset()" style="width:100%;margin-top:8px;padding:12px;border-radius:12px;font-weight:800;background:linear-gradient(135deg,#f5d76e,#d4af37);color:#111">تعيين الرمز الجديد</button>
@@ -1122,6 +1122,7 @@ async function doReset() {
     acct.h = await sha(acct.s + p); saveAcct(); rlSet(null);
     ['acRA', 'acRP', 'acRP2', 'acP'].forEach(i => $(i).value = '');
     try { sessionStorage.setItem('sp_in', '1'); } catch {}
+    await setRem($('acRem').checked);
     $('acctModal').style.display = 'none'; toast('تم تعيين الرمز الجديد ✔ مرحبًا ' + acct.u);
 }
 async function saveSecQ() {
@@ -1145,9 +1146,24 @@ async function acctGo() {
     }
     else if (u !== acct.u || await sha(acct.s + p) !== acct.h) return toast('بيانات غير صحيحة', 'err');
     try { sessionStorage.setItem('sp_in', '1'); } catch {}
+    await setRem($('acRem').checked);
     $('acctModal').style.display = 'none'; toast('مرحبًا ' + acct.u);
 }
-try { if (!acct || sessionStorage.getItem('sp_in') !== '1') showAcct(); } catch { showAcct(); }
+/* حفظ الدخول: رمز مرتبط بكلمة السر الحالية، صالح 90 يوماً من آخر استعمال، ويُلغى بتسجيل الخروج أو بتغيير الرمز */
+const REM_DAYS = 90, remTok = () => sha(acct.s + '|rem|' + acct.h);
+async function setRem(on) { try { if (on && acct) localStorage.setItem('sp_rem', JSON.stringify({ t: Date.now(), k: await remTok() })); else localStorage.removeItem('sp_rem'); } catch {} }
+async function checkRem() {
+    try {
+        const r = JSON.parse(localStorage.getItem('sp_rem')); if (!acct || !r) return false;
+        if (Date.now() - r.t > REM_DAYS * 864e5 || r.k !== await remTok()) { localStorage.removeItem('sp_rem'); return false; }
+        r.t = Date.now(); localStorage.setItem('sp_rem', JSON.stringify(r)); return true;
+    } catch { return false; }
+}
+(async () => {
+    let ok = false;
+    try { ok = !!acct && (sessionStorage.getItem('sp_in') === '1' || await checkRem()); } catch {}
+    if (!ok) showAcct(); else { try { sessionStorage.setItem('sp_in', '1'); } catch {} }
+})();
 
 function subMsg() {
     const P = PLANS[subPlan], M = { visa: 'Visa', bn: 'Binance', post: 'حساب البريد', rd: 'RedotPay' }[subPay];
@@ -1203,6 +1219,7 @@ document.body.insertAdjacentHTML('beforeend', `<div id="setModal" onclick="if(ev
 <div class="text-xs text-gray-400 mt-4 mb-1">🔄 التحديثات</div>
 <div class="bg-gray-900/60 border border-gray-800 rounded-xl p-3 flex items-center justify-between text-xs"><span>الإصدار الحالي: <b id="setVer"></b></span><button onclick="checkUpdate(true)" class="text-emerald-400 font-bold">🔄 تحقق الآن</button></div>
 <div class="text-xs text-gray-400 mt-2">🔐 مفتاح التفعيل: <b id="setKid" class="font-mono"></b></div>
+<label class="flex items-center justify-between bg-gray-900/60 border border-gray-800 rounded-xl p-3 text-xs mt-3"><span>🔒 حفظ الدخول على هذا الجهاز</span><input id="setRem" type="checkbox" onchange="setRem(this.checked)" style="width:auto"></label>
 <div class="text-xs text-gray-400 mt-4 mb-1">🔑 سؤال استرجاع الرمز السري</div>
 <div class="space-y-2"><input id="setQ" placeholder="سؤالك الخاص" class="w-full ${inp}"><input id="setA" placeholder="الإجابة" class="w-full ${inp}"><input id="setQP" type="password" placeholder="رمزك السري الحالي للتأكيد" class="w-full ${inp}"><button onclick="saveSecQ()" class="w-full text-emerald-400 font-bold border border-emerald-500/30 rounded-xl py-2 text-sm">💾 حفظ السؤال</button></div>
 <button onclick="logout()" class="w-full mt-2 text-rose-400 font-bold border border-rose-500/30 rounded-xl py-2 text-sm">🚪 تسجيل الخروج</button></div></div>`);
@@ -1211,15 +1228,15 @@ const hdrBox = $('clock').parentElement;
 const capCard = $('setCash').closest('.glass-card'); capCard.className = 'space-y-3'; $('setCapital').appendChild(capCard);
 hdrBox.insertAdjacentHTML('beforeend', '<button onclick="openSettings()" class="text-xs px-3 py-1.5 rounded-xl border border-emerald-500/40 bg-gray-900/60 text-emerald-300 font-bold">⚙️ الإعدادات</button>');
 function copyWa() { const n = '+' + PHONE; const done = () => toast('تم نسخ الرقم ' + n); if (navigator.clipboard) navigator.clipboard.writeText(n).then(done, done); else done(); }
-function openSettings() { $('setKid').textContent = LIC_PUB.x.slice(0, 6); $('setWaNum').textContent = '+' + PHONE.replace(/^(\d{3})(\d{3})(\d{2})(\d{2})(\d{2})$/, '$1 $2 $3 $4 $5'); $('setWa').href = 'https://wa.me/' + PHONE + '?text=' + encodeURIComponent('السلام عليكم، أحتاج مساعدة في Simou POS.\nرقم جهازي: ' + lic.dev + '\nالإصدار: ' + APP_VERSION); $('setVer').textContent = APP_VERSION; $('setVer2').textContent = 'v' + APP_VERSION; $('setQ').value = acct && acct.q || ''; $('setUser').textContent = acct ? acct.u : '-'; $('setDev').textContent = lic.dev; $('setModal').style.display = 'flex'; }
+function openSettings() { try { $('setRem').checked = !!localStorage.getItem('sp_rem'); } catch {} $('setKid').textContent = LIC_PUB.x.slice(0, 6); $('setWaNum').textContent = '+' + PHONE.replace(/^(\d{3})(\d{3})(\d{2})(\d{2})(\d{2})$/, '$1 $2 $3 $4 $5'); $('setWa').href = 'https://wa.me/' + PHONE + '?text=' + encodeURIComponent('السلام عليكم، أحتاج مساعدة في Simou POS.\nرقم جهازي: ' + lic.dev + '\nالإصدار: ' + APP_VERSION); $('setVer').textContent = APP_VERSION; $('setVer2').textContent = 'v' + APP_VERSION; $('setQ').value = acct && acct.q || ''; $('setUser').textContent = acct ? acct.u : '-'; $('setDev').textContent = lic.dev; $('setModal').style.display = 'flex'; }
 function closeSettings() { $('setModal').style.display = 'none'; }
-function logout() { try { sessionStorage.removeItem('sp_in'); } catch {} closeSettings(); $('acP').value = ''; showAcct(); }
+function logout() { try { sessionStorage.removeItem('sp_in'); localStorage.removeItem('sp_rem'); } catch {} closeSettings(); $('acP').value = ''; showAcct(); }
 $('licModal').remove();
 
 renderAll(); renderCart(); selectUnit('BOX'); __ready = true; renderLic();
 
 /* ---------- App update notifications (reads version.json from the server) ---------- */
-var APP_VERSION = '1.0.3', updInfo = null, lastChk = 0;
+var APP_VERSION = '1.0.4', updInfo = null, lastChk = 0;
 const verGt = (a, b) => { const A = String(a).split('.').map(Number), B = String(b).split('.').map(Number); for (let i = 0; i < Math.max(A.length, B.length); i++) { const x = A[i] || 0, y = B[i] || 0; if (x !== y) return x > y; } return false; };
 const escU = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 async function checkUpdate(manual) {
