@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: simoupos
+    runtime: docker
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: POS_PIN
+        sync: false
+      - key: CASHIER_PIN
+        sync: false
