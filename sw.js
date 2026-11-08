@@ -1,5 +1,5 @@
 /* SimouPos service worker. غيّر VERSION عند كل إصدار جديد ليصل التحديث للمستخدمين */
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 const CACHE = 'simoupos-' + VERSION;
 const CORE = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 const EXT = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdnjs.cloudflare.com'];
